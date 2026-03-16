@@ -6,16 +6,20 @@ AIエージェントがお仕事おわったらずんだもんが叫んでくれ
 
 - macOS
 - Claude Code
+- Codex
 
 ## 使い方なのだ
 
 ```bash
 mise install      # Node.js と pnpm を召喚するのだ
 pnpm start        # ずんだもんが待機するのだ
-pnpm hook         # Claude Code の hooks 設定を ~/.claude/settings.json に書き込むのだ
+pnpm hook         # Claude Code / Codex を見つけて、どれに設定するか聞いてくるのだ
 ```
 
-設定を書き込まずに中身だけ見たいときは `pnpm hook:show` なのだ。
+`pnpm hook` は `claude` と `codex` コマンドを探して、入ってるやつだけ候補に出すのだ。
+両方入ってたら「Claude Code だけ」「Codex だけ」「両方」を選べるのだ。
+
+設定を書き込まずに中身だけ見たいときは `pnpm hook:show` なのだ。Claude Code 用の `settings.json` と Codex 用の `config.toml` の例をまとめて見せるのだ。
 
 黙らせたいときは `pnpm stop` なのだ。でもずんだもんは悲しいのだ。
 

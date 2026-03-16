@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 
 import { parseArgs } from "node:util";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
-import { homedir } from "node:os";
+import { createInterface } from "node:readline/promises";
 import { startServer } from "../src/server.js";
 import { daemonize, stopDaemon } from "../src/daemon.js";
+import {
+  CLAUDE_SETTINGS_PATH,
+  CODEX_CONFIG_PATH,
+  buildClaudeHookConfig,
+  buildCodexNotifyConfig,
+  detectInstalledClients,
+  writeClaudeSettingsFile,
+  writeCodexConfigFile,
+} from "../src/integrations.js";
 
 const HELP = `
 zundamonotify - ずんだもんの声でAIエージェントの完了をお知らせするのだ！
@@ -13,127 +20,231 @@ zundamonotify - ずんだもんの声でAIエージェントの完了をお知�
 つかいかたなのだ:
   pnpm start                 通知サーバーを起動するのだ（デフォルトなのだ）
   pnpm stop                  サーバーを止めるのだ
-  pnpm hook                  ~/.claude/settings.json に hooks 設定を自動で書き込むのだ
-  pnpm hook:show             hooks 設定の JSON を画面に出すだけなのだ（書き込まないのだ）
+  pnpm hook                  Claude Code / Codex の設定を対話式で書き込むのだ
+  pnpm hook:show             Claude Code / Codex の設定例を画面に出すだけなのだ
 
 オプションなのだ:
   serve --port <number>      ポートを指定するのだ (デフォルト: 12378)
 `.trim();
 
-const SETTINGS_PATH = resolve(homedir(), ".claude", "settings.json");
-
-function curlCommand(event) {
-  return `curl -s --connect-timeout 1 -X POST http://host.docker.internal:12378/notifications/${event} || curl -s --connect-timeout 1 -X POST http://localhost:12378/notifications/${event}`;
-}
-
-function buildHookEntry(event) {
-  return {
-    matcher: "",
-    hooks: [
-      {
-        type: "command",
-        command: curlCommand(event),
-      },
-    ],
-  };
-}
-
-const HOOK_TYPES = ["Stop", "Notification"];
-
-function hasZundamonotifyHook(entries, event) {
-  return entries.some((entry) =>
-    entry.hooks?.some((h) => h.command && h.command.includes(`12378/notifications/${event}`)),
-  );
-}
-
-function writeSettingsFile() {
-  let parsed = {};
-
-  if (existsSync(SETTINGS_PATH)) {
-    parsed = JSON.parse(readFileSync(SETTINGS_PATH, "utf-8"));
-  }
-
-  if (!parsed.hooks) parsed.hooks = {};
-
-  let added = 0;
-  for (const type of HOOK_TYPES) {
-    const event = type.toLowerCase();
-    if (!parsed.hooks[type]) parsed.hooks[type] = [];
-    if (!hasZundamonotifyHook(parsed.hooks[type], event)) {
-      parsed.hooks[type].push(buildHookEntry(event));
-      added++;
-    }
-  }
-
-  if (added === 0) {
-    console.log("もう設定済みなのだ！スキップするのだ！");
-    return;
-  }
-
-  mkdirSync(resolve(homedir(), ".claude"), { recursive: true });
-  writeFileSync(SETTINGS_PATH, JSON.stringify(parsed, null, 2) + "\n");
-
-  console.log(`設定を書き込んだのだ！: ${SETTINGS_PATH}`);
-}
-
-const command = process.argv[2];
-
-switch (command) {
-  case "serve":
-  case undefined: {
-    const { values } = parseArgs({
-      args: process.argv.slice(command === "serve" ? 3 : 2),
-      options: {
-        port: { type: "string", short: "p", default: "12378" },
-      },
+async function readAllFromStdin() {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
     });
-    const port = Number(values.port);
-    if (process.env.ZUNDAMONOTIFY_CHILD) {
-      startServer(port);
-    } else {
-      daemonize(port);
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", reject);
+  });
+}
+const CLIENT_ACTIONS = {
+  claude() {
+    const result = writeClaudeSettingsFile();
+    if (result.status === "already") {
+      console.log("Claude Code はもう設定済みなのだ！スキップするのだ！");
+      return;
     }
-    break;
-  }
+    console.log(`Claude Code に設定を書き込んだのだ！: ${result.path}`);
+  },
 
-  case "stop": {
-    stopDaemon();
-    break;
-  }
+  async codex(prompter) {
+    let result = writeCodexConfigFile();
 
-  case "init": {
-    const { values } = parseArgs({
-      args: process.argv.slice(3),
-      options: {
-        file: { type: "boolean", short: "f", default: false },
-      },
-    });
+    if (result.status === "conflict") {
+      const overwrite = await promptYesNo(
+        prompter,
+        "Codex の notify はもう別の設定があるのだ。ずんだもん用に上書きするのだ？ [y/N]: ",
+        false,
+      );
+      if (!overwrite) {
+        console.log("Codex の設定はそのままにしたのだ！");
+        return;
+      }
+      result = writeCodexConfigFile({ overwrite: true });
+    }
 
-    if (values.file) {
-      writeSettingsFile();
-    } else {
-      const config = {
-        hooks: Object.fromEntries(HOOK_TYPES.map((type) => [type, [buildHookEntry(type.toLowerCase())]])),
+    if (result.status === "already") {
+      console.log("Codex はもう設定済みなのだ！スキップするのだ！");
+      return;
+    }
+
+    console.log(`Codex に設定を書き込んだのだ！: ${result.path}`);
+  },
+};
+
+function createPrompter() {
+  if (!process.stdin.isTTY) {
+    return readAllFromStdin().then((input) => {
+      const answers = input.split(/\r?\n/);
+      let index = 0;
+
+      return {
+        async question(text) {
+          process.stdout.write(text);
+          return (answers[index++] ?? "").trim();
+        },
+        close() {},
       };
-
-      console.log();
-      console.log("=== Claude Code の settings.json に以下を追加するのだ！ ===");
-      console.log();
-      console.log(JSON.stringify(config, null, 2));
-      console.log();
-      console.log("設定ファイルの場所はここなのだ:");
-      console.log("  ~/.claude/settings.json");
-      console.log();
-      console.log("※ Devcontainer 内では host.docker.internal 経由で接続するのだ。");
-      console.log("  ローカル環境では localhost にフォールバックするから安心なのだ！");
-      console.log();
-      console.log("💡 pnpm hook で自動書き込みできるのだ！");
-      console.log();
-    }
-    break;
+    });
   }
 
-  default:
-    console.log(HELP);
-    process.exitCode = command !== "--help" && command !== "-h" ? 1 : 0;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  return Promise.resolve({
+    async question(text) {
+      return (await rl.question(text)).trim();
+    },
+    close() {
+      rl.close();
+    },
+  });
 }
+
+async function promptYesNo(prompter, question, defaultValue) {
+  const answer = (await prompter.question(question)).toLowerCase();
+  if (!answer) return defaultValue;
+  return answer === "y" || answer === "yes";
+}
+
+function buildSelectionOptions(installedClients) {
+  const options = installedClients.map((client, index) => ({
+    key: String(index + 1),
+    label: client.label,
+    clients: [client.id],
+  }));
+
+  if (installedClients.length > 1) {
+    options.push({
+      key: String(options.length + 1),
+      label: "両方",
+      clients: installedClients.map((client) => client.id),
+    });
+  }
+
+  return options;
+}
+
+async function chooseClients(installedClients, prompter) {
+  if (installedClients.length === 0) {
+    console.log("Claude Code も Codex も見つからなかったのだ……。先にインストールしてほしいのだ。");
+    process.exitCode = 1;
+    return [];
+  }
+
+  const options = buildSelectionOptions(installedClients);
+  const defaultKey = options.at(-1)?.key ?? "1";
+
+  console.log("見つかったクライアントなのだ:");
+  for (const client of installedClients) {
+    console.log(`  - ${client.label}`);
+  }
+  console.log("");
+  console.log("どれに設定するか選ぶのだ:");
+  for (const option of options) {
+    console.log(`  ${option.key}. ${option.label}`);
+  }
+  console.log("  0. 何もしない");
+
+  const answer = await prompter.question(`番号を入れるのだ [${defaultKey}]: `);
+  const selected = answer || defaultKey;
+  if (selected === "0") {
+    console.log("今回は何もしないのだ！");
+    return [];
+  }
+
+  const option = options.find((candidate) => candidate.key === selected);
+  if (!option) {
+    console.log("その番号はわからないのだ……。今回は何もしないのだ。");
+    process.exitCode = 1;
+    return [];
+  }
+
+  return option.clients;
+}
+
+async function configureClients() {
+  const installedClients = detectInstalledClients();
+  const prompter = await createPrompter();
+
+  try {
+    const selectedClients = await chooseClients(installedClients, prompter);
+    for (const clientId of selectedClients) {
+      await CLIENT_ACTIONS[clientId](prompter);
+    }
+  } finally {
+    prompter.close();
+  }
+}
+
+function printConfigExamples() {
+  const claudeConfig = buildClaudeHookConfig();
+  const codexConfig = buildCodexNotifyConfig();
+
+  console.log();
+  console.log("=== Claude Code の settings.json に追加する内容なのだ ===");
+  console.log();
+  console.log(JSON.stringify(claudeConfig, null, 2));
+  console.log();
+  console.log(`設定ファイルの場所: ${CLAUDE_SETTINGS_PATH}`);
+  console.log("※ Devcontainer 内では host.docker.internal を先に試すのだ。");
+  console.log();
+  console.log("=== Codex の config.toml に追加する内容なのだ ===");
+  console.log();
+  console.log(codexConfig);
+  console.log();
+  console.log(`設定ファイルの場所: ${CODEX_CONFIG_PATH}`);
+  console.log();
+  console.log("💡 pnpm hook なら、入ってるクライアントを見つけて対話式で設定するのだ！");
+  console.log();
+}
+
+async function main() {
+  const command = process.argv[2];
+
+  switch (command) {
+    case "serve":
+    case undefined: {
+      const { values } = parseArgs({
+        args: process.argv.slice(command === "serve" ? 3 : 2),
+        options: {
+          port: { type: "string", short: "p", default: "12378" },
+        },
+      });
+      const port = Number(values.port);
+      if (process.env.ZUNDAMONOTIFY_CHILD) {
+        startServer(port);
+      } else {
+        daemonize(port);
+      }
+      break;
+    }
+
+    case "stop": {
+      stopDaemon();
+      break;
+    }
+
+    case "init": {
+      const { values } = parseArgs({
+        args: process.argv.slice(3),
+        options: {
+          file: { type: "boolean", short: "f", default: false },
+        },
+      });
+
+      if (values.file) {
+        await configureClients();
+      } else {
+        printConfigExamples();
+      }
+      break;
+    }
+
+    default:
+      console.log(HELP);
+      process.exitCode = command !== "--help" && command !== "-h" ? 1 : 0;
+  }
+}
+
+await main();
