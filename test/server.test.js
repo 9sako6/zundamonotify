@@ -23,8 +23,8 @@ deps.execFile = (cmd, cmdArgs, cb) => {
 /**
  * テスト用の HTTP リクエストヘルパーなのだ
  */
-async function request(port, method, path) {
-  const res = await fetch(`http://localhost:${port}${path}`, { method });
+async function request(port, method, path, init = {}) {
+  const res = await fetch(`http://localhost:${port}${path}`, { method, ...init });
   const body = await res.json();
   return { status: res.status, body };
 }
@@ -112,14 +112,27 @@ describe("HTTP Server なのだ", () => {
   });
 
   it("POST /notifications/stop にボディ付きで送っても 200 なのだ、寛容なのだ", async () => {
-    const res = await fetch(`http://localhost:${port}/notifications/stop`, {
-      method: "POST",
+    const res = await request(port, "POST", "/notifications/stop", {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ msg: "ずんだもんへのテスト通知なのだ" }),
     });
     assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.deepEqual(body, { ok: true });
+    assert.deepEqual(res.body, { ok: true });
+  });
+
+  it("POST /notifications/stop に volume を送るとその音量でしゃべるのだ", async () => {
+    const before = execFileCalls.length;
+    const res = await request(port, "POST", "/notifications/stop", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ volume: 75 }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true });
+    assert.equal(execFileCalls.length, before + 1);
+
+    const [cmd, args] = execFileCalls.at(-1);
+    assert.equal(cmd, "afplay");
+    assert.deepEqual(args.slice(0, 2), ["-v", "0.75"]);
   });
 });
 
@@ -178,7 +191,22 @@ describe("playSound なのだ", () => {
     assert.equal(execFileCalls.length, before + 1);
     const [cmd, args] = execFileCalls.at(-1);
     assert.equal(cmd, "afplay");
-    assert.deepEqual(args, [tmpWav]);
+    assert.deepEqual(args, ["-v", "1", tmpWav]);
+
+    unlinkSync(tmpWav);
+  });
+
+  it("音量を指定して afplay に渡せるのだ", () => {
+    const tmpWav = join(tmpdir(), "zundamonotify-test-volume.wav");
+    writeFileSync(tmpWav, "RIFF dummy");
+
+    const before = execFileCalls.length;
+    playSound(tmpWav, 25);
+
+    assert.equal(execFileCalls.length, before + 1);
+    const [cmd, args] = execFileCalls.at(-1);
+    assert.equal(cmd, "afplay");
+    assert.deepEqual(args, ["-v", "0.25", tmpWav]);
 
     unlinkSync(tmpWav);
   });
@@ -218,7 +246,8 @@ describe("playSoundForEvent なのだ", () => {
     assert.equal(execFileCalls.length, before + 1);
     const [cmd, args] = execFileCalls.at(-1);
     assert.equal(cmd, "afplay");
-    assert.match(args[0], /assets[/\\]stop[/\\].*\.wav$/);
+    assert.deepEqual(args.slice(0, 2), ["-v", "1"]);
+    assert.match(args[2], /assets[/\\]stop[/\\].*\.wav$/);
   });
 
   it("notification イベントで assets/notification/ の wav を再生するのだ", () => {
@@ -227,7 +256,8 @@ describe("playSoundForEvent なのだ", () => {
     assert.equal(execFileCalls.length, before + 1);
     const [cmd, args] = execFileCalls.at(-1);
     assert.equal(cmd, "afplay");
-    assert.match(args[0], /assets[/\\]notification[/\\].*\.wav$/);
+    assert.deepEqual(args.slice(0, 2), ["-v", "1"]);
+    assert.match(args[2], /assets[/\\]notification[/\\].*\.wav$/);
   });
 
   it("ASSETS_DIR はプロジェクトの assets/ を指してるのだ", () => {

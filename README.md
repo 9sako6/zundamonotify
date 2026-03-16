@@ -13,11 +13,12 @@ AIエージェントがお仕事おわったらずんだもんが叫んでくれ
 ```bash
 mise install      # Node.js と pnpm を召喚するのだ
 pnpm start        # ずんだもんが待機するのだ
-pnpm hook         # Claude Code / Codex を見つけて、どれに設定するか聞いてくるのだ
+pnpm hook         # Claude Code / Codex を見つけて、どれに設定するかと音量を聞いてくるのだ
 ```
 
 `pnpm hook` は `claude` と `codex` コマンドを探して、入ってるやつだけ候補に出すのだ。
 両方入ってたら「Claude Code だけ」「Codex だけ」「両方」を選べるのだ。
+音量は `%` で決めるのだ。`100` が標準の音量なのだ。
 
 設定を書き込まずに中身だけ見たいときは `pnpm hook:show` なのだ。Claude Code 用の `settings.json` と Codex 用の `config.toml` の例をまとめて見せるのだ。
 

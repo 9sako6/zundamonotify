@@ -4,41 +4,68 @@ import { delimiter, dirname, resolve } from "node:path";
 
 export const CLAUDE_SETTINGS_PATH = resolve(homedir(), ".claude", "settings.json");
 export const CODEX_CONFIG_PATH = resolve(homedir(), ".codex", "config.toml");
+export const CODEX_NOTIFY_EVENT = "agent-turn-complete";
+export const DEFAULT_VOLUME_PERCENT = 100;
+
 const HOOK_TYPES = ["Stop", "Notification"];
 const SUPPORTED_CLIENTS = [
   { id: "claude", label: "Claude Code", command: "claude" },
   { id: "codex", label: "Codex", command: "codex" },
 ];
 
-export function curlCommand(event) {
-  return `curl -s --connect-timeout 1 -X POST http://host.docker.internal:12378/notifications/${event} || curl -s --connect-timeout 1 -X POST http://localhost:12378/notifications/${event}`;
+export function parseVolumePercent(value) {
+  if (value === undefined || value === null || value === "") return null;
+
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(number)) return null;
+  if (number < 0 || number > 100) return null;
+  return Math.round(number);
 }
 
-export function buildClaudeHookEntry(event) {
+function serializeNotificationPayload(volumePercent = DEFAULT_VOLUME_PERCENT) {
+  return JSON.stringify({ volume: volumePercent });
+}
+
+export function curlCommand(event, volumePercent = DEFAULT_VOLUME_PERCENT) {
+  const body = serializeNotificationPayload(volumePercent);
+  const prefix = `curl -s --connect-timeout 1 -H "Content-Type: application/json" --data '${body}' -X POST`;
+  return `${prefix} http://host.docker.internal:12378/notifications/${event} || ${prefix} http://localhost:12378/notifications/${event}`;
+}
+
+export function buildClaudeHookEntry(event, volumePercent = DEFAULT_VOLUME_PERCENT) {
   return {
     matcher: "",
     hooks: [
       {
         type: "command",
-        command: curlCommand(event),
+        command: curlCommand(event, volumePercent),
       },
     ],
   };
 }
 
-export function buildClaudeHookConfig() {
+export function buildClaudeHookConfig({ volumePercent = DEFAULT_VOLUME_PERCENT } = {}) {
   return {
-    hooks: Object.fromEntries(HOOK_TYPES.map((type) => [type, [buildClaudeHookEntry(type.toLowerCase())]])),
+    hooks: Object.fromEntries(
+      HOOK_TYPES.map((type) => [type, [buildClaudeHookEntry(type.toLowerCase(), volumePercent)]]),
+    ),
   };
 }
 
-export function hasZundamonotifyHook(entries, event) {
-  return entries.some((entry) =>
+function findZundamonotifyHookIndex(entries, event) {
+  return entries.findIndex((entry) =>
     entry.hooks?.some((hook) => hook.command && hook.command.includes(`12378/notifications/${event}`)),
   );
 }
 
-export function writeClaudeSettingsFile(settingsPath = CLAUDE_SETTINGS_PATH) {
+function sameClaudeHookEntry(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function writeClaudeSettingsFile({
+  settingsPath = CLAUDE_SETTINGS_PATH,
+  volumePercent = DEFAULT_VOLUME_PERCENT,
+} = {}) {
   let parsed = {};
 
   if (existsSync(settingsPath)) {
@@ -47,23 +74,32 @@ export function writeClaudeSettingsFile(settingsPath = CLAUDE_SETTINGS_PATH) {
 
   if (!parsed.hooks) parsed.hooks = {};
 
-  let added = 0;
+  let changed = 0;
   for (const type of HOOK_TYPES) {
     const event = type.toLowerCase();
     if (!parsed.hooks[type]) parsed.hooks[type] = [];
-    if (!hasZundamonotifyHook(parsed.hooks[type], event)) {
-      parsed.hooks[type].push(buildClaudeHookEntry(event));
-      added++;
+    const nextEntry = buildClaudeHookEntry(event, volumePercent);
+    const existingIndex = findZundamonotifyHookIndex(parsed.hooks[type], event);
+
+    if (existingIndex === -1) {
+      parsed.hooks[type].push(nextEntry);
+      changed++;
+      continue;
+    }
+
+    if (!sameClaudeHookEntry(parsed.hooks[type][existingIndex], nextEntry)) {
+      parsed.hooks[type][existingIndex] = nextEntry;
+      changed++;
     }
   }
 
-  if (added === 0) {
+  if (changed === 0) {
     return { status: "already", path: settingsPath };
   }
 
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(parsed, null, 2) + "\n");
-  return { status: "updated", path: settingsPath, added };
+  return { status: "updated", path: settingsPath, changed };
 }
 
 function isExecutable(filePath) {
@@ -108,12 +144,18 @@ function escapeTomlBasicString(value) {
   return value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
 }
 
-export function buildCodexNotifyCommand() {
-  return ["sh", "-lc", curlCommand("stop")];
+export function buildCodexNotifyCommand({
+  volumePercent = DEFAULT_VOLUME_PERCENT,
+} = {}) {
+  return ["sh", "-lc", curlCommand("stop", volumePercent)];
 }
 
-export function buildCodexNotifyLine() {
-  const items = buildCodexNotifyCommand().map((value) => `"${escapeTomlBasicString(value)}"`);
+export function buildCodexNotifyLine({
+  volumePercent = DEFAULT_VOLUME_PERCENT,
+} = {}) {
+  const items = buildCodexNotifyCommand({ volumePercent }).map(
+    (value) => `"${escapeTomlBasicString(value)}"`,
+  );
   return `notify = [${items.join(", ")}]`;
 }
 
@@ -198,16 +240,17 @@ function sameCommand(a, b) {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
-export function buildCodexNotifyConfig() {
-  return buildCodexNotifyLine();
+export function buildCodexNotifyConfig({ volumePercent = DEFAULT_VOLUME_PERCENT } = {}) {
+  return buildCodexNotifyLine({ volumePercent });
 }
 
 export function writeCodexConfigFile({
   configPath = CODEX_CONFIG_PATH,
+  volumePercent = DEFAULT_VOLUME_PERCENT,
   overwrite = false,
 } = {}) {
-  const desiredCommand = buildCodexNotifyCommand();
-  const desiredLine = buildCodexNotifyLine();
+  const desiredCommand = buildCodexNotifyCommand({ volumePercent });
+  const desiredLine = buildCodexNotifyLine({ volumePercent });
   const current = existsSync(configPath) ? readFileSync(configPath, "utf-8") : "";
   const { root, rest } = splitTomlRoot(current);
   const range = findTopLevelNotifyRange(root);

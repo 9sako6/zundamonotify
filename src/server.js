@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_VOLUME_PERCENT, parseVolumePercent } from "./integrations.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ASSETS_DIR = resolve(__dirname, "..", "assets");
@@ -35,11 +36,27 @@ export function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-export function playSound(wavPath) {
+export function volumePercentToPlayerValue(volumePercent = DEFAULT_VOLUME_PERCENT) {
+  const normalized = parseVolumePercent(volumePercent) ?? DEFAULT_VOLUME_PERCENT;
+  return String(Number((normalized / 100).toFixed(2)));
+}
+
+function parseNotificationPayload(rawBody) {
+  if (!rawBody) return {};
+
+  try {
+    const parsed = JSON.parse(rawBody);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function playSound(wavPath, volumePercent = DEFAULT_VOLUME_PERCENT) {
   if (playing) return;
 
   playing = true;
-  deps.execFile("afplay", [wavPath], (err) => {
+  deps.execFile("afplay", ["-v", volumePercentToPlayerValue(volumePercent), wavPath], (err) => {
     playing = false;
     if (err) {
       console.error("⚠ 再生に失敗したのだ！ずんだもんの声が出せないのだ！:", err.message);
@@ -50,14 +67,14 @@ export function playSound(wavPath) {
 /**
  * イベント種別に応じたランダム音声を再生するのだ
  */
-export function playSoundForEvent(event) {
+export function playSoundForEvent(event, { volumePercent = DEFAULT_VOLUME_PERCENT } = {}) {
   const dir = resolve(ASSETS_DIR, event === "notification" ? "notification" : "stop");
   const files = listWavFiles(dir);
   if (files.length === 0) {
     console.warn(`⚠ ${dir} に .wav ファイルが見つからないのだ！`);
     return;
   }
-  playSound(pickRandom(files));
+  playSound(pickRandom(files), volumePercent);
 }
 
 export function startServer(port) {
@@ -65,11 +82,17 @@ export function startServer(port) {
     const match = req.method === "POST" && req.url?.match(/^\/notifications\/(stop|notification)$/);
     if (match) {
       const event = match[1];
-      req.resume();
+      let rawBody = "";
+      req.setEncoding("utf-8");
+      req.on("data", (chunk) => {
+        rawBody += chunk;
+      });
       req.on("end", () => {
+        const payload = parseNotificationPayload(rawBody);
+        const volumePercent = parseVolumePercent(payload.volume) ?? DEFAULT_VOLUME_PERCENT;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(RES_OK);
-        playSoundForEvent(event);
+        playSoundForEvent(event, { volumePercent });
       });
       return;
     }

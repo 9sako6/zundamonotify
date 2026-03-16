@@ -55,6 +55,14 @@ function runWithInput(args, { env, stdin } = {}) {
   });
 }
 
+function extractClaudeConfigJson(output) {
+  const match = output.match(
+    /=== Claude Code の settings\.json に追加する内容なのだ ===\n\n([\s\S]*?)\n\n設定ファイルの場所:/,
+  );
+  assert.ok(match, "Claude Code の JSON 設定が見つかるのだ");
+  return match[1];
+}
+
 /**
  * テスト後にデーモンを掃除するヘルパーなのだ
  */
@@ -139,16 +147,15 @@ describe("zundamonotify init", () => {
     assert.match(result.stdout, /12378/);
     assert.match(result.stdout, /notifications\/stop/);
     assert.match(result.stdout, /notifications\/notification/);
+    assert.match(result.stdout, /\\"volume\\":100/);
     assert.match(result.stdout, /notify = \[/);
     assert.match(result.stdout, /"sh", "-lc"/);
+    assert.match(result.stdout, /host\.docker\.internal/);
   });
 
   it("出力に含まれる JSON はちゃんとパースできるのだ", async () => {
     const result = await run(["init"]);
-    // JSON 部分を抽出するのだ (最初の { から最後の } まで)
-    const jsonMatch = result.stdout.match(/\{[\s\S]*\}/);
-    assert.ok(jsonMatch, "JSON が出力に含まれてるのだ");
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(extractClaudeConfigJson(result.stdout));
     assert.ok(parsed.hooks.Stop);
     assert.ok(parsed.hooks.Notification);
     assert.equal(parsed.hooks.Stop[0].hooks[0].type, "command");
@@ -157,8 +164,7 @@ describe("zundamonotify init", () => {
 
   it("curl コマンドに host.docker.internal → localhost のフォールバックがあるのだ", async () => {
     const result = await run(["init"]);
-    const jsonMatch = result.stdout.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(extractClaudeConfigJson(result.stdout));
     const cmd = parsed.hooks.Stop[0].hooks[0].command;
     // host.docker.internal が先に来てるのだ
     const dockerIdx = cmd.indexOf("host.docker.internal");
@@ -166,6 +172,8 @@ describe("zundamonotify init", () => {
     assert.ok(dockerIdx < localhostIdx, "host.docker.internal が先に試行されるのだ");
     assert.match(cmd, /\|\|/, "|| でフォールバックしてるのだ");
     assert.match(cmd, /--connect-timeout/, "タイムアウト付きなのだ");
+    assert.match(cmd, /Content-Type: application\/json/, "JSON で音量も送るのだ");
+    assert.match(cmd, /"volume":100/, "デフォルト音量 100% を積んでるのだ");
     assert.match(cmd, /notifications\/stop/, "Stop イベントの URL なのだ");
   });
 
@@ -212,9 +220,11 @@ describe("zundamonotify init -f", () => {
     assert.ok(written.hooks.Stop);
     assert.equal(written.hooks.Stop.length, 1);
     assert.match(written.hooks.Stop[0].hooks[0].command, /12378\/notifications\/stop/);
+    assert.match(written.hooks.Stop[0].hooks[0].command, /"volume":100/);
     assert.ok(written.hooks.Notification);
     assert.equal(written.hooks.Notification.length, 1);
     assert.match(written.hooks.Notification[0].hooks[0].command, /12378\/notifications\/notification/);
+    assert.match(written.hooks.Notification[0].hooks[0].command, /"volume":100/);
   });
 
   it("既存の settings.json を壊さずフックを追記するのだ", async () => {
@@ -289,6 +299,27 @@ describe("zundamonotify init -f", () => {
     assert.equal(written.hooks.Notification.length, 1);
   });
 
+  it("Claude Code の既存フックは音量変更で差し替えられるのだ", async () => {
+    const home = setupTmpHome();
+
+    await runWithInput(["init", "-f"], {
+      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
+      stdin: "\n",
+    });
+    const result = await runWithInput(["init", "-f"], {
+      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
+      stdin: "1\n80\n",
+    });
+    assert.equal(result.exitCode, 0);
+    assert.doesNotMatch(result.stdout, /もう設定済みなのだ/);
+
+    const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    assert.equal(written.hooks.Stop.length, 1);
+    assert.equal(written.hooks.Notification.length, 1);
+    assert.match(written.hooks.Stop[0].hooks[0].command, /"volume":80/);
+    assert.match(written.hooks.Notification[0].hooks[0].command, /"volume":80/);
+  });
+
   it("Codex だけ見つかったときは config.toml に notify を書くのだ", async () => {
     const home = setupTmpHome();
     rmSync(codexConfigPath, { force: true });
@@ -303,6 +334,8 @@ describe("zundamonotify init -f", () => {
     const written = readFileSync(codexConfigPath, "utf-8");
     assert.match(written, /^notify = \[/m);
     assert.match(written, /"sh", "-lc"/);
+    assert.match(written, /notifications\/stop/);
+    assert.match(written, /"volume\\":100/);
   });
 
   it("両方見つかったときはまとめて設定できるのだ", async () => {
@@ -325,7 +358,7 @@ describe("zundamonotify init -f", () => {
 
     const result = await runWithInput(["init", "-f"], {
       env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "codex" },
-      stdin: "1\ny\n",
+      stdin: "1\n100\ny\n",
     });
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /上書きするのだ/);
@@ -333,6 +366,19 @@ describe("zundamonotify init -f", () => {
     const written = readFileSync(codexConfigPath, "utf-8");
     assert.match(written, /"sh", "-lc"/);
     assert.doesNotMatch(written, /"old"/);
+  });
+
+  it("Codex の音量も対話で変えられるのだ", async () => {
+    const home = setupTmpHome();
+
+    const result = await runWithInput(["init", "-f"], {
+      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "codex" },
+      stdin: "\n65\n",
+    });
+    assert.equal(result.exitCode, 0);
+
+    const written = readFileSync(codexConfigPath, "utf-8");
+    assert.match(written, /"volume\\":65/);
   });
 
   it("対応クライアントが見つからないときは教えてくれるのだ", async () => {
