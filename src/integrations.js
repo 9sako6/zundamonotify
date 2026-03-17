@@ -8,6 +8,7 @@ export const CODEX_NOTIFY_EVENT = "agent-turn-complete";
 export const DEFAULT_VOLUME_PERCENT = 100;
 
 const HOOK_TYPES = ["Stop", "Notification"];
+const MARKER = ": zundamonotify ;";
 const SUPPORTED_CLIENTS = [
   { id: "claude", label: "Claude Code", command: "claude" },
   { id: "codex", label: "Codex", command: "codex" },
@@ -29,7 +30,7 @@ function serializeNotificationPayload(volumePercent = DEFAULT_VOLUME_PERCENT) {
 export function curlCommand(event, volumePercent = DEFAULT_VOLUME_PERCENT) {
   const body = serializeNotificationPayload(volumePercent);
   const prefix = `curl -s --connect-timeout 1 -H "Content-Type: application/json" --data '${body}' -X POST`;
-  return `${prefix} http://host.docker.internal:12378/notifications/${event} || ${prefix} http://localhost:12378/notifications/${event}`;
+  return `${MARKER} ${prefix} http://host.docker.internal:12378/notifications/${event} || ${prefix} http://localhost:12378/notifications/${event}`;
 }
 
 export function buildClaudeHookEntry(event, volumePercent = DEFAULT_VOLUME_PERCENT) {
@@ -52,9 +53,9 @@ export function buildClaudeHookConfig({ volumePercent = DEFAULT_VOLUME_PERCENT }
   };
 }
 
-function findZundamonotifyHookIndex(entries, event) {
+function findZundamonotifyHookIndex(entries) {
   return entries.findIndex((entry) =>
-    entry.hooks?.some((hook) => hook.command && hook.command.includes(`12378/notifications/${event}`)),
+    entry.hooks?.some((hook) => hook.command && hook.command.includes(MARKER)),
   );
 }
 
@@ -79,7 +80,7 @@ export function writeClaudeSettingsFile({
     const event = type.toLowerCase();
     if (!parsed.hooks[type]) parsed.hooks[type] = [];
     const nextEntry = buildClaudeHookEntry(event, volumePercent);
-    const existingIndex = findZundamonotifyHookIndex(parsed.hooks[type], event);
+    const existingIndex = findZundamonotifyHookIndex(parsed.hooks[type]);
 
     if (existingIndex === -1) {
       parsed.hooks[type].push(nextEntry);
