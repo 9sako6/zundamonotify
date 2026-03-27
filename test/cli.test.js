@@ -142,6 +142,7 @@ describe("zundamonotify init", () => {
     assert.match(result.stdout, /"hooks"/);
     assert.match(result.stdout, /"Stop"/);
     assert.match(result.stdout, /"Notification"/);
+    assert.match(result.stdout, /"SubagentStop"/);
     assert.match(result.stdout, /host\.docker\.internal/);
     assert.match(result.stdout, /localhost/);
     assert.match(result.stdout, /12378/);
@@ -158,8 +159,12 @@ describe("zundamonotify init", () => {
     const parsed = JSON.parse(extractClaudeConfigJson(result.stdout));
     assert.ok(parsed.hooks.Stop);
     assert.ok(parsed.hooks.Notification);
+    assert.ok(parsed.hooks.SubagentStop);
     assert.equal(parsed.hooks.Stop[0].hooks[0].type, "command");
     assert.equal(parsed.hooks.Notification[0].hooks[0].type, "command");
+    assert.equal(parsed.hooks.SubagentStop[0].hooks[0].type, "command");
+    assert.match(parsed.hooks.SubagentStop[0].hooks[0].command, /notifications\/notification/,
+      "SubagentStop は notification エンドポイントにマッピングされるのだ");
   });
 
   it("curl コマンドに host.docker.internal → localhost のフォールバックがあるのだ", async () => {
@@ -225,6 +230,10 @@ describe("zundamonotify init -f", () => {
     assert.equal(written.hooks.Notification.length, 1);
     assert.match(written.hooks.Notification[0].hooks[0].command, /12378\/notifications\/notification/);
     assert.match(written.hooks.Notification[0].hooks[0].command, /"volume":100/);
+    assert.ok(written.hooks.SubagentStop);
+    assert.equal(written.hooks.SubagentStop.length, 1);
+    assert.match(written.hooks.SubagentStop[0].hooks[0].command, /12378\/notifications\/notification/,
+      "SubagentStop は notification エンドポイントを叩くのだ");
   });
 
   it("既存の settings.json を壊さずフックを追記するのだ", async () => {
@@ -297,6 +306,7 @@ describe("zundamonotify init -f", () => {
     const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
     assert.equal(written.hooks.Stop.length, 1);
     assert.equal(written.hooks.Notification.length, 1);
+    assert.equal(written.hooks.SubagentStop.length, 1);
   });
 
   it("Claude Code の既存フックは音量変更で差し替えられるのだ", async () => {
@@ -316,8 +326,10 @@ describe("zundamonotify init -f", () => {
     const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
     assert.equal(written.hooks.Stop.length, 1);
     assert.equal(written.hooks.Notification.length, 1);
+    assert.equal(written.hooks.SubagentStop.length, 1);
     assert.match(written.hooks.Stop[0].hooks[0].command, /"volume":80/);
     assert.match(written.hooks.Notification[0].hooks[0].command, /"volume":80/);
+    assert.match(written.hooks.SubagentStop[0].hooks[0].command, /"volume":80/);
   });
 
   it("Codex だけ見つかったときは config.toml に notify を書くのだ", async () => {

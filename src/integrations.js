@@ -7,7 +7,12 @@ export const CODEX_CONFIG_PATH = resolve(homedir(), ".codex", "config.toml");
 export const CODEX_NOTIFY_EVENT = "agent-turn-complete";
 export const DEFAULT_VOLUME_PERCENT = 100;
 
-const HOOK_TYPES = ["Stop", "Notification"];
+const HOOK_TYPES = ["Stop", "Notification", "SubagentStop"];
+const HOOK_EVENT_MAP = {
+  Stop: "stop",
+  Notification: "notification",
+  SubagentStop: "notification",
+};
 const MARKER = ": zundamonotify ;";
 const SUPPORTED_CLIENTS = [
   { id: "claude", label: "Claude Code", command: "claude" },
@@ -48,7 +53,7 @@ export function buildClaudeHookEntry(event, volumePercent = DEFAULT_VOLUME_PERCE
 export function buildClaudeHookConfig({ volumePercent = DEFAULT_VOLUME_PERCENT } = {}) {
   return {
     hooks: Object.fromEntries(
-      HOOK_TYPES.map((type) => [type, [buildClaudeHookEntry(type.toLowerCase(), volumePercent)]]),
+      HOOK_TYPES.map((type) => [type, [buildClaudeHookEntry(HOOK_EVENT_MAP[type], volumePercent)]]),
     ),
   };
 }
@@ -77,7 +82,7 @@ export function writeClaudeSettingsFile({
 
   let changed = 0;
   for (const type of HOOK_TYPES) {
-    const event = type.toLowerCase();
+    const event = HOOK_EVENT_MAP[type];
     if (!parsed.hooks[type]) parsed.hooks[type] = [];
     const nextEntry = buildClaudeHookEntry(event, volumePercent);
     const existingIndex = findZundamonotifyHookIndex(parsed.hooks[type]);
