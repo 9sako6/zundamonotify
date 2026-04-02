@@ -407,6 +407,18 @@ describe("zundamonotify init -f", () => {
 // ---------------------------------------------------------------------------
 // serve (フォアグラウンド: 環境変数で子プロセスとして起動) なのだ
 // ---------------------------------------------------------------------------
+describe("zundamonotify serve (ポートバリデーション)", () => {
+  for (const badPort of ["abc", "99999", "3.14"]) {
+    it(`不正なポート "${badPort}" はエラーになるのだ`, async () => {
+      const result = await run(["serve", "--port", badPort], {
+        env: { ZUNDAMONOTIFY_CHILD: "1" },
+      });
+      assert.equal(result.exitCode, 1);
+      assert.match(result.stderr, /ポートは 0〜65535 の整数を指定するのだ/);
+    });
+  }
+});
+
 describe("zundamonotify serve (子プロセスモード)", () => {
   it("ZUNDAMONOTIFY_CHILD=1 でフォアグラウンドサーバーが起動するのだ", async () => {
     const proc = spawn(process.execPath, [CLI, "serve", "--port", "0"], {

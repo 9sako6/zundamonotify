@@ -55,24 +55,30 @@ export function daemonize(port) {
 
   const logFd = openSync(LOG_FILE, "a");
 
-  const child = spawn(
-    process.execPath,
-    [CLI_PATH, "serve", "-p", String(port)],
-    {
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      env: { ...process.env, ZUNDAMONOTIFY_CHILD: "1" },
-    },
-  );
+  try {
+    const child = spawn(
+      process.execPath,
+      [CLI_PATH, "serve", "-p", String(port)],
+      {
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        env: { ...process.env, ZUNDAMONOTIFY_CHILD: "1" },
+      },
+    );
 
-  writeFileSync(PID_FILE, String(child.pid));
-  child.unref();
-  closeSync(logFd);
+    writeFileSync(PID_FILE, String(child.pid));
+    child.unref();
 
-  console.log(`ずんだもんデーモンが起動したのだ！ (PID: ${child.pid})`);
-  console.log(`  ポート: ${port}`);
-  console.log(`  ログ:   ${LOG_FILE}`);
-  console.log(`止めるときは pnpm stop なのだ！`);
+    console.log(`ずんだもんデーモンが起動したのだ！ (PID: ${child.pid})`);
+    console.log(`  ポート: ${port}`);
+    console.log(`  ログ:   ${LOG_FILE}`);
+    console.log(`止めるときは pnpm stop なのだ！`);
+  } catch (err) {
+    console.error(`⚠ デーモンの起動に失敗したのだ！: ${err.message}`);
+    process.exitCode = 1;
+  } finally {
+    closeSync(logFd);
+  }
 }
 
 export function stopDaemon() {

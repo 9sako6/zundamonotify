@@ -13,6 +13,8 @@ export const deps = { execFile };
 
 const RES_OK = JSON.stringify({ ok: true });
 const RES_NOT_FOUND = JSON.stringify({ error: "Not Found" });
+const RES_PAYLOAD_TOO_LARGE = JSON.stringify({ error: "Payload Too Large" });
+const MAX_BODY_BYTES = 1024;
 
 let playing = false;
 
@@ -83,11 +85,19 @@ export function startServer(port) {
     if (match) {
       const event = match[1];
       let rawBody = "";
+      let aborted = false;
       req.setEncoding("utf-8");
       req.on("data", (chunk) => {
         rawBody += chunk;
+        if (rawBody.length > MAX_BODY_BYTES) {
+          aborted = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(RES_PAYLOAD_TOO_LARGE);
+          req.destroy();
+        }
       });
       req.on("end", () => {
+        if (aborted) return;
         const payload = parseNotificationPayload(rawBody);
         const volumePercent = parseVolumePercent(payload.volume) ?? DEFAULT_VOLUME_PERCENT;
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -101,7 +111,19 @@ export function startServer(port) {
     res.end(RES_NOT_FOUND);
   });
 
-  server.listen(port, () => {
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`⚠ ポート ${port} はもう使われてるのだ！`);
+    } else {
+      console.error(`⚠ サーバーエラーなのだ！: ${err.message}`);
+    }
+    process.exitCode = 1;
+  });
+
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 10_000;
+
+  server.listen(port, "127.0.0.1", () => {
     console.log(`ずんだもん通知サーバーが起動したのだ！ http://localhost:${port}`);
     console.log(`POST /notifications/stop         → 完了音声をランダム再生するのだ！`);
     console.log(`POST /notifications/notification  → 通知音声をランダム再生するのだ！`);

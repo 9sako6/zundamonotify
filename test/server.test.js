@@ -36,8 +36,9 @@ describe("HTTP Server なのだ", () => {
   let server;
   let port;
 
-  before(() => {
+  before(async () => {
     server = startServer(0);
+    await new Promise((resolve) => server.on("listening", resolve));
     port = server.address().port;
   });
 
@@ -109,6 +110,18 @@ describe("HTTP Server なのだ", () => {
       assert.equal(res.status, 200);
       assert.deepEqual(res.body, { ok: true });
     }
+  });
+
+  it("巨大なボディを送ったら 413 で拒否するのだ、ずんだもんにも限界があるのだ", async () => {
+    const hugeBody = "x".repeat(2048);
+    const res = await fetch(`http://localhost:${port}/notifications/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: hugeBody,
+    });
+    assert.equal(res.status, 413);
+    const body = await res.json();
+    assert.deepEqual(body, { error: "Payload Too Large" });
   });
 
   it("POST /notifications/stop にボディ付きで送っても 200 なのだ、寛容なのだ", async () => {

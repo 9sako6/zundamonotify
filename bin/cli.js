@@ -233,6 +233,11 @@ async function main() {
         },
       });
       const port = Number(values.port);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        console.error("⚠ ポートは 0〜65535 の整数を指定するのだ！");
+        process.exitCode = 1;
+        break;
+      }
       if (process.env.ZUNDAMONOTIFY_CHILD) {
         startServer(port);
       } else {
