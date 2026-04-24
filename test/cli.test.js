@@ -53,6 +53,20 @@ describe("zundamonotify --help", () => {
   });
 });
 
+describe("zundamonotify --version", () => {
+  it("package version を表示するのだ", async () => {
+    const result = await run(["--version"]);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout.trim(), "0.1.5");
+  });
+
+  it("-v でも package version を表示するのだ", async () => {
+    const result = await run(["-v"]);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout.trim(), "0.1.5");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 引数なし → help なのだ
 // ---------------------------------------------------------------------------

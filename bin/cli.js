@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { parseArgs } from "node:util";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createCodexSessionsMonitor } from "../src/codex-monitor.js";
@@ -23,6 +24,13 @@ zundamonotify - ずんだもんの声でAIエージェントの完了をお知�
 開発用なのだ:
   zundamonotify serve --port <number>  通知サーバーを前景で起動するのだ
 `.trim();
+
+function readPackageVersion() {
+  const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  return version;
+}
+
+const VERSION = process.env.ZUNDAMONOTIFY_VERSION || readPackageVersion();
 
 export function createAgentEventNotifier(port, source) {
   return async function notifyAgentEvent(event = {}) {
@@ -92,6 +100,12 @@ export async function main() {
   switch (command) {
     case undefined: {
       console.log(HELP);
+      break;
+    }
+
+    case "--version":
+    case "-v": {
+      console.log(VERSION);
       break;
     }
 
