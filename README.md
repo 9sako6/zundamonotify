@@ -11,13 +11,22 @@ AIエージェントがお仕事おわったらずんだもんが叫んでくれ
 ## 使い方なのだ
 
 ```bash
-mise install      # Node.js と pnpm を召喚するのだ
-pnpm start        # ずんだもんが待機するのだ
+zundamonotify install
 ```
 
-`pnpm start` 中は Codex と Claude Code のローカルログをポーリングして、完了を検知したら鳴らすのだ。
+これでログイン時に自動起動するのだ。Codex と Claude Code のローカルログをポーリングして、完了を検知したら鳴らすのだ。
 
-黙らせたいときは `pnpm stop` なのだ。でもずんだもんは悲しいのだ。
+状態を見るときはこれなのだ。
+
+```bash
+zundamonotify status
+```
+
+黙らせたいときはこれなのだ。でもずんだもんは悲しいのだ。
+
+```bash
+zundamonotify uninstall
+```
 
 ## ライセンスなのだ
 

@@ -6,17 +6,22 @@ import { pathToFileURL } from "node:url";
 import { createCodexSessionsMonitor } from "../src/codex-monitor.js";
 import { createClaudeCodeSessionsMonitor } from "../src/claude-code-monitor.js";
 import { startServer } from "../src/server.js";
-import { daemonize, stopDaemon } from "../src/daemon.js";
+import {
+  getLaunchAgentStatus,
+  installLaunchAgent,
+  uninstallLaunchAgent,
+} from "../src/launchd.js";
 
 const HELP = `
 zundamonotify - ずんだもんの声でAIエージェントの完了をお知らせするのだ！
 
 つかいかたなのだ:
-  pnpm start                 通知サーバーを起動するのだ（デフォルトなのだ）
-  pnpm stop                  サーバーを止めるのだ
+  zundamonotify install      ログイン時に自動起動するようにするのだ
+  zundamonotify uninstall    自動起動を解除するのだ
+  zundamonotify status       自動起動の状態を見るのだ
 
-オプションなのだ:
-  serve --port <number>      ポートを指定するのだ (デフォルト: 12378)
+開発用なのだ:
+  zundamonotify serve --port <number>  通知サーバーを前景で起動するのだ
 `.trim();
 
 function createStopNotifier(port) {
@@ -52,10 +57,14 @@ async function main() {
   const command = process.argv[2];
 
   switch (command) {
-    case "serve":
     case undefined: {
+      console.log(HELP);
+      break;
+    }
+
+    case "install": {
       const { values } = parseArgs({
-        args: process.argv.slice(command === "serve" ? 3 : 2),
+        args: process.argv.slice(3),
         options: {
           port: { type: "string", short: "p", default: "12378" },
         },
@@ -66,21 +75,52 @@ async function main() {
         process.exitCode = 1;
         break;
       }
-      if (process.env.ZUNDAMONOTIFY_CHILD) {
-        const server = startServer(port);
-        server.on("listening", () => {
-          const address = server.address();
-          const activePort = typeof address === "object" && address ? address.port : port;
-          startSessionMonitors(activePort);
-        });
+      const result = installLaunchAgent({ port });
+      console.log(`zundamonotify を自動起動に登録したのだ: ${result.path}`);
+      break;
+    }
+
+    case "uninstall": {
+      const result = uninstallLaunchAgent();
+      if (result.wasInstalled) {
+        console.log("zundamonotify の自動起動を解除したのだ");
       } else {
-        daemonize(port);
+        console.log("zundamonotify は自動起動に登録されていないのだ");
       }
       break;
     }
 
-    case "stop": {
-      stopDaemon();
+    case "status": {
+      const status = getLaunchAgentStatus();
+      if (!status.installed) {
+        console.log("zundamonotify は自動起動に登録されていないのだ");
+      } else if (status.running) {
+        console.log("zundamonotify は自動起動に登録されていて、動いているのだ");
+      } else {
+        console.log("zundamonotify は自動起動に登録されているけど、動いていないのだ");
+      }
+      break;
+    }
+
+    case "serve": {
+      const { values } = parseArgs({
+        args: process.argv.slice(3),
+        options: {
+          port: { type: "string", short: "p", default: "12378" },
+        },
+      });
+      const port = Number(values.port);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        console.error("⚠ ポートは 0〜65535 の整数を指定するのだ！");
+        process.exitCode = 1;
+        break;
+      }
+      const server = startServer(port);
+      server.on("listening", () => {
+        const address = server.address();
+        const activePort = typeof address === "object" && address ? address.port : port;
+        startSessionMonitors(activePort);
+      });
       break;
     }
 

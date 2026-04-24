@@ -3,8 +3,6 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, unlinkSync, readFileSync } from "node:fs";
-import { PID_FILE } from "../src/daemon.js";
 import { startSessionMonitors } from "../bin/cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,21 +26,6 @@ function run(args, { env } = {}) {
   });
 }
 
-/**
- * テスト後にデーモンを掃除するヘルパーなのだ
- */
-function cleanupDaemon() {
-  if (existsSync(PID_FILE)) {
-    const pid = Number(readFileSync(PID_FILE, "utf-8").trim());
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {}
-    try {
-      unlinkSync(PID_FILE);
-    } catch {}
-  }
-}
-
 // ---------------------------------------------------------------------------
 // --help なのだ
 // ---------------------------------------------------------------------------
@@ -51,6 +34,9 @@ describe("zundamonotify --help", () => {
     const result = await run(["--help"]);
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /zundamonotify/);
+    assert.match(result.stdout, /install/);
+    assert.match(result.stdout, /uninstall/);
+    assert.match(result.stdout, /status/);
     assert.match(result.stdout, /serve/);
   });
 
@@ -60,24 +46,20 @@ describe("zundamonotify --help", () => {
     assert.match(result.stdout, /zundamonotify/);
   });
 
-  it("ヘルプに stop が載ってるのだ", async () => {
+  it("ヘルプに status が載ってるのだ", async () => {
     const result = await run(["--help"]);
-    assert.match(result.stdout, /stop/);
+    assert.match(result.stdout, /status/);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 引数なし → serve（デーモン起動）なのだ
+// 引数なし → help なのだ
 // ---------------------------------------------------------------------------
 describe("zundamonotify (引数なしで呼んだのだ)", () => {
-  afterEach(cleanupDaemon);
-
-  it("引数なしでデーモンが起動するのだ", async () => {
-    cleanupDaemon();
+  it("引数なしでヘルプを表示するのだ", async () => {
     const result = await run([]);
     assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /デーモンが起動したのだ/);
-    assert.ok(existsSync(PID_FILE), "PID ファイルが作られてるのだ");
+    assert.match(result.stdout, /つかいかたなのだ/);
   });
 });
 
@@ -99,7 +81,7 @@ describe("zundamonotify serve (ポートバリデーション)", () => {
   for (const badPort of ["abc", "99999", "3.14"]) {
     it(`不正なポート "${badPort}" はエラーになるのだ`, async () => {
       const result = await run(["serve", "--port", badPort], {
-        env: { ZUNDAMONOTIFY_CHILD: "1" },
+        env: {},
       });
       assert.equal(result.exitCode, 1);
       assert.match(result.stderr, /ポートは 0〜65535 の整数を指定するのだ/);
@@ -108,10 +90,10 @@ describe("zundamonotify serve (ポートバリデーション)", () => {
 });
 
 describe("zundamonotify serve (子プロセスモード)", () => {
-  it("ZUNDAMONOTIFY_CHILD=1 でフォアグラウンドサーバーが起動するのだ", async () => {
+  it("フォアグラウンドサーバーが起動するのだ", async () => {
     const proc = spawn(process.execPath, [CLI, "serve", "--port", "0"], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ZUNDAMONOTIFY_CHILD: "1" },
+      env: { ...process.env },
     });
 
     const output = await new Promise((resolve, reject) => {
@@ -154,48 +136,5 @@ describe("startSessionMonitors", () => {
       ["claude", 12378],
     ]);
     assert.equal(handles.length, 2);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// serve (デーモンモード) なのだ
-// ---------------------------------------------------------------------------
-describe("zundamonotify serve (デーモン)", () => {
-  afterEach(cleanupDaemon);
-
-  it("デーモンとして起動して PID ファイルが作られるのだ", async () => {
-    const result = await run(["serve", "-p", "19876"]);
-    assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /デーモンが起動したのだ/);
-    assert.match(result.stdout, /PID:/);
-    assert.ok(existsSync(PID_FILE), "PID ファイルが作られてるのだ");
-  });
-
-  it("二重起動しようとしたら怒られるのだ", async () => {
-    await run(["serve", "-p", "19877"]);
-    const result = await run(["serve", "-p", "19877"]);
-    assert.equal(result.exitCode, 1);
-    assert.match(result.stdout, /もう起動してるのだ/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// stop なのだ
-// ---------------------------------------------------------------------------
-describe("zundamonotify stop", () => {
-  it("デーモンを起動して stop で止められるのだ", async () => {
-    await run(["serve", "-p", "19878"]);
-    await new Promise((r) => setTimeout(r, 200));
-    const result = await run(["stop"]);
-    assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /止めたのだ/);
-    assert.ok(!existsSync(PID_FILE), "PID ファイルが消えてるのだ");
-  });
-
-  it("動いてないときに stop しても優しく教えてくれるのだ", async () => {
-    if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
-    const result = await run(["stop"]);
-    assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /動いてないのだ/);
   });
 });

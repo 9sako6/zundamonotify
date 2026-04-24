@@ -1,3 +1,11 @@
 [tools]
 node = "24.15.0"
 pnpm = "10.33.2"
+
+[tasks.serve]
+run = "pnpm serve"
+description = "Run zundamonotify in the foreground"
+
+[tasks.test]
+run = "pnpm test"
+description = "Run the test suite"
