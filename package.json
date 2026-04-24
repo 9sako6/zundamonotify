@@ -1,13 +1,13 @@
 {
   "name": "zundamonotify",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "AIエージェントのお仕事完了を「ずんだもん」の音声でお知らせするCLIツールなのだ",
   "type": "module",
   "bin": {
     "zundamonotify": "./bin/cli.js"
   },
   "scripts": {
-    "build": "bun build ./bin/bun-entry.js --compile --target=bun-darwin-arm64 --outfile ./dist/zundamonotify-macos-arm64",
+    "build": "node scripts/build-binary.js",
     "serve": "node bin/cli.js serve",
     "test": "node --test"
   },

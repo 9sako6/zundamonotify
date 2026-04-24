@@ -146,5 +146,7 @@ const isMain = process.argv[1]
   : false;
 
 if (isMain) {
-  await main();
+  if (process.env.ZUNDAMONOTIFY_BUN_ENTRY !== "1") {
+    await main();
+  }
 }
