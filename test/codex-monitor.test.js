@@ -296,4 +296,96 @@ describe("createCodexSessionsMonitor", () => {
 
     assert.deepEqual(events.map((event) => event.turnId), ["turn-2"]);
   });
+
+  it("guardian session の approval review 完了は通知しないのだ", () => {
+    const nowMs = Date.parse("2026-04-24T10:00:00.000Z");
+    const filePath = makeSessionFile();
+    const events = [];
+
+    writeFileSync(filePath, "");
+
+    const monitor = createCodexSessionsMonitor({
+      sessionDir: tmpRoot,
+      completionDelayMs: 0,
+      now: () => nowMs,
+      schedule: runImmediately,
+      onTaskComplete(event) {
+        events.push(event);
+      },
+    });
+
+    monitor.poll();
+    appendFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: "2026-04-24T10:00:00.000Z",
+          type: "session_meta",
+          payload: {
+            cwd: "/work/zundamonotify",
+            source: { subagent: { other: "guardian" } },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-04-24T10:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-guardian",
+            last_agent_message: JSON.stringify({ outcome: "allow" }),
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+    monitor.poll();
+
+    assert.deepEqual(events, []);
+  });
+
+  it("codex-auto-review の完了は通知しないのだ", () => {
+    const nowMs = Date.parse("2026-04-24T10:00:00.000Z");
+    const filePath = makeSessionFile();
+    const events = [];
+
+    writeFileSync(filePath, "");
+
+    const monitor = createCodexSessionsMonitor({
+      sessionDir: tmpRoot,
+      completionDelayMs: 0,
+      now: () => nowMs,
+      schedule: runImmediately,
+      onTaskComplete(event) {
+        events.push(event);
+      },
+    });
+
+    monitor.poll();
+    appendFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: "2026-04-24T10:00:00.000Z",
+          type: "turn_context",
+          payload: {
+            turn_id: "turn-review",
+            model: "codex-auto-review",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-04-24T10:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-review",
+            last_agent_message: JSON.stringify({ outcome: "allow" }),
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+    monitor.poll();
+
+    assert.deepEqual(events, []);
+  });
 });

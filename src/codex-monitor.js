@@ -35,6 +35,8 @@ function createTrackedEntry(fileName) {
     cwd: "",
     partial: "",
     lastCompletedTurnId: null,
+    ignored: false,
+    ignoredTurns: new Set(),
   };
 }
 
@@ -58,6 +60,16 @@ export function createCodexSessionsMonitor({
     const { type, payload } = parsed;
     if (type === "session_meta" && payload && typeof payload === "object") {
       entry.cwd = payload.cwd || "";
+      if (payload.source?.subagent?.other === "guardian") {
+        entry.ignored = true;
+      }
+      return;
+    }
+
+    if (type === "turn_context" && payload && typeof payload === "object") {
+      if (payload.model === "codex-auto-review" && payload.turn_id) {
+        entry.ignoredTurns.add(payload.turn_id);
+      }
       return;
     }
 
@@ -66,6 +78,10 @@ export function createCodexSessionsMonitor({
     }
 
     const turnId = payload.turn_id ?? null;
+    if (entry.ignored || (turnId && entry.ignoredTurns.has(turnId))) {
+      return;
+    }
+
     if (turnId && turnId === entry.lastCompletedTurnId) {
       return;
     }
