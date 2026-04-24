@@ -3,16 +3,9 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  existsSync,
-  unlinkSync,
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  rmSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, unlinkSync, readFileSync } from "node:fs";
 import { PID_FILE } from "../src/daemon.js";
+import { startSessionMonitors } from "../bin/cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, "..", "bin", "cli.js");
@@ -33,14 +26,6 @@ function run(args, { env } = {}) {
       });
     });
   });
-}
-
-function extractClaudeConfigJson(output) {
-  const match = output.match(
-    /=== Claude Code の settings\.json に追加する内容なのだ ===\n\n([\s\S]*?)\n\n設定ファイルの場所:/,
-  );
-  assert.ok(match, "Claude Code の JSON 設定が見つかるのだ");
-  return match[1];
 }
 
 /**
@@ -67,7 +52,6 @@ describe("zundamonotify --help", () => {
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /zundamonotify/);
     assert.match(result.stdout, /serve/);
-    assert.match(result.stdout, /hook/);
   });
 
   it("-h でも同じように見せてくれるのだ", async () => {
@@ -105,198 +89,6 @@ describe("zundamonotify unknown", () => {
     const result = await run(["unknown"]);
     assert.equal(result.exitCode, 1);
     assert.match(result.stdout, /つかいかたなのだ/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// init なのだ
-// ---------------------------------------------------------------------------
-describe("zundamonotify init", () => {
-  it("Claude Code の設定例をちゃんと出力するのだ", async () => {
-    const result = await run(["init"]);
-    assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /settings\.json/);
-    assert.match(result.stdout, /Claude Code/);
-    assert.match(result.stdout, /"hooks"/);
-    assert.match(result.stdout, /"Stop"/);
-    assert.match(result.stdout, /"Notification"/);
-    assert.match(result.stdout, /"SubagentStop"/);
-    assert.match(result.stdout, /host\.docker\.internal/);
-    assert.match(result.stdout, /localhost/);
-    assert.match(result.stdout, /12378/);
-    assert.match(result.stdout, /notifications\/stop/);
-    assert.match(result.stdout, /notifications\/notification/);
-  });
-
-  it("出力に含まれる JSON はちゃんとパースできるのだ", async () => {
-    const result = await run(["init"]);
-    const parsed = JSON.parse(extractClaudeConfigJson(result.stdout));
-    assert.ok(parsed.hooks.Stop);
-    assert.ok(parsed.hooks.Notification);
-    assert.ok(parsed.hooks.SubagentStop);
-    assert.equal(parsed.hooks.Stop[0].hooks[0].type, "command");
-    assert.equal(parsed.hooks.Notification[0].hooks[0].type, "command");
-    assert.equal(parsed.hooks.SubagentStop[0].hooks[0].type, "command");
-    assert.match(parsed.hooks.SubagentStop[0].hooks[0].command, /notifications\/notification/,
-      "SubagentStop は notification エンドポイントにマッピングされるのだ");
-  });
-
-  it("curl コマンドに host.docker.internal → localhost のフォールバックがあるのだ", async () => {
-    const result = await run(["init"]);
-    const parsed = JSON.parse(extractClaudeConfigJson(result.stdout));
-    const cmd = parsed.hooks.Stop[0].hooks[0].command;
-    // host.docker.internal が先に来てるのだ
-    const dockerIdx = cmd.indexOf("host.docker.internal");
-    const localhostIdx = cmd.indexOf("localhost");
-    assert.ok(dockerIdx < localhostIdx, "host.docker.internal が先に試行されるのだ");
-    assert.match(cmd, /\|\|/, "|| でフォールバックしてるのだ");
-    assert.match(cmd, /--connect-timeout/, "タイムアウト付きなのだ");
-    assert.doesNotMatch(cmd, /Content-Type: application\/json/, "余計なヘッダは付けないのだ");
-    assert.match(cmd, /notifications\/stop/, "Stop イベントの URL なのだ");
-  });
-
-  it("pnpm hook のヒントが表示されるのだ", async () => {
-    const result = await run(["init"]);
-    assert.match(result.stdout, /pnpm hook/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// init -f なのだ
-// ---------------------------------------------------------------------------
-describe("zundamonotify init -f", () => {
-  let tmpHome;
-  let settingsPath;
-
-  afterEach(() => {
-    if (tmpHome && existsSync(tmpHome)) {
-      rmSync(tmpHome, { recursive: true, force: true });
-    }
-  });
-
-  function setupTmpHome() {
-    tmpHome = resolve(tmpdir(), `zundamonotify-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(resolve(tmpHome, ".claude"), { recursive: true });
-    settingsPath = resolve(tmpHome, ".claude", "settings.json");
-    return tmpHome;
-  }
-
-  it("Claude Code だけ見つかったときは settings.json を新規作成するのだ", async () => {
-    const home = setupTmpHome();
-    rmSync(settingsPath, { force: true });
-    const result = await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
-    });
-    assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /Claude Code に設定を書き込んだのだ/);
-
-    const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    assert.ok(written.hooks.Stop);
-    assert.equal(written.hooks.Stop.length, 1);
-    assert.match(written.hooks.Stop[0].hooks[0].command, /12378\/notifications\/stop/);
-    assert.ok(written.hooks.Notification);
-    assert.equal(written.hooks.Notification.length, 1);
-    assert.match(written.hooks.Notification[0].hooks[0].command, /12378\/notifications\/notification/);
-    assert.ok(written.hooks.SubagentStop);
-    assert.equal(written.hooks.SubagentStop.length, 1);
-    assert.match(written.hooks.SubagentStop[0].hooks[0].command, /12378\/notifications\/notification/,
-      "SubagentStop は notification エンドポイントを叩くのだ");
-  });
-
-  it("既存の settings.json を壊さずフックを追記するのだ", async () => {
-    const home = setupTmpHome();
-    const existing = {
-      hooks: {
-        Notification: [{ matcher: "", hooks: [{ type: "command", command: "echo hi" }] }],
-      },
-      permissions: { allow: ["Read"] },
-    };
-    writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
-
-    const result = await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
-    });
-    assert.equal(result.exitCode, 0);
-
-    const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    // 既存の Notification hook が残ってるのだ
-    assert.ok(written.hooks.Notification);
-    assert.equal(written.hooks.Notification[0].hooks[0].command, "echo hi");
-    // zundamonotify の Notification hook が追記されてるのだ
-    assert.equal(written.hooks.Notification.length, 2);
-    assert.match(written.hooks.Notification[1].hooks[0].command, /12378\/notifications\/notification/);
-    // permissions も残ってるのだ
-    assert.deepEqual(written.permissions, { allow: ["Read"] });
-    // Stop フックが追加されてるのだ
-    assert.ok(written.hooks.Stop);
-    assert.equal(written.hooks.Stop.length, 1);
-  });
-
-  it("既に Stop に他のフックがある場合は壊さず追記するのだ", async () => {
-    const home = setupTmpHome();
-    const existing = {
-      hooks: {
-        Stop: [{ matcher: "", hooks: [{ type: "command", command: "echo done" }] }],
-      },
-    };
-    writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
-
-    const result = await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
-    });
-    assert.equal(result.exitCode, 0);
-
-    const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    assert.equal(written.hooks.Stop.length, 2);
-    assert.equal(written.hooks.Stop[0].hooks[0].command, "echo done");
-    assert.match(written.hooks.Stop[1].hooks[0].command, /12378\/notifications\/stop/);
-    // Notification も追加されてるのだ
-    assert.ok(written.hooks.Notification);
-    assert.equal(written.hooks.Notification.length, 1);
-  });
-
-  it("重複して追記しないのだ", async () => {
-    const home = setupTmpHome();
-
-    await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
-    });
-    const result = await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
-    });
-    assert.match(result.stdout, /Claude Code はもう設定済みなのだ/);
-
-    const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    assert.equal(written.hooks.Stop.length, 1);
-    assert.equal(written.hooks.Notification.length, 1);
-    assert.equal(written.hooks.SubagentStop.length, 1);
-  });
-
-  it("Claude Code の既存フック形式が同じなら再実行しても維持されるのだ", async () => {
-    const home = setupTmpHome();
-
-    await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
-    });
-    const result = await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "claude" },
-    });
-    assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /もう設定済みなのだ/);
-
-    const written = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    assert.equal(written.hooks.Stop.length, 1);
-    assert.equal(written.hooks.Notification.length, 1);
-    assert.equal(written.hooks.SubagentStop.length, 1);
-  });
-
-  it("対応クライアントが見つからないときは教えてくれるのだ", async () => {
-    const home = setupTmpHome();
-    const result = await run(["init", "-f"], {
-      env: { HOME: home, ZUNDAMONOTIFY_AVAILABLE_CLIENTS: "" },
-    });
-    assert.equal(result.exitCode, 1);
-    assert.match(result.stdout, /Claude Code が見つからなかったのだ/);
   });
 });
 
@@ -340,6 +132,28 @@ describe("zundamonotify serve (子プロセスモード)", () => {
 
     assert.match(output, /ずんだもん通知サーバーが起動したのだ/);
     proc.kill();
+  });
+});
+
+describe("startSessionMonitors", () => {
+  it("登録された monitor starter を全部起動するのだ", () => {
+    const calls = [];
+    const handles = startSessionMonitors(12378, [
+      (port) => {
+        calls.push(["codex", port]);
+        return { stop() {} };
+      },
+      (port) => {
+        calls.push(["claude", port]);
+        return { stop() {} };
+      },
+    ]);
+
+    assert.deepEqual(calls, [
+      ["codex", 12378],
+      ["claude", 12378],
+    ]);
+    assert.equal(handles.length, 2);
   });
 });
 

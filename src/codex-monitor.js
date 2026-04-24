@@ -1,6 +1,7 @@
-import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { createJsonlMonitor } from "./jsonl-monitor.js";
 
 export const CODEX_SESSIONS_PATH = resolve(homedir(), ".codex", "sessions");
 export const DEFAULT_CODEX_POLL_INTERVAL_MS = 1500;
@@ -37,18 +38,6 @@ function createTrackedEntry(fileName) {
   };
 }
 
-function readNewBytes(filePath, offset, size) {
-  const fd = openSync(filePath, "r");
-  try {
-    const length = size - offset;
-    const buffer = Buffer.alloc(length);
-    readSync(fd, buffer, 0, length, offset);
-    return buffer.toString("utf-8");
-  } finally {
-    closeSync(fd);
-  }
-}
-
 export function createCodexSessionsMonitor({
   sessionDir = CODEX_SESSIONS_PATH,
   pollIntervalMs = DEFAULT_CODEX_POLL_INTERVAL_MS,
@@ -58,9 +47,6 @@ export function createCodexSessionsMonitor({
   schedule = setTimeout,
   cancel = clearTimeout,
 } = {}) {
-  const tracked = new Map();
-  const pendingTimers = new Set();
-
   function processLine(line, entry, notifyOnTaskComplete) {
     let parsed;
     try {
@@ -85,110 +71,45 @@ export function createCodexSessionsMonitor({
     }
 
     entry.lastCompletedTurnId = turnId;
-    if (!notifyOnTaskComplete) {
-      return;
-    }
-
-    const event = {
-      sessionId: entry.sessionId,
-      cwd: entry.cwd,
-      turnId,
-      lastAgentMessage: payload.last_agent_message || "",
-    };
-    let timer;
-    let fired = false;
-    timer = schedule(() => {
-      fired = true;
-      if (timer !== undefined) {
-        pendingTimers.delete(timer);
-      }
-      onTaskComplete(event);
-    }, completionDelayMs);
-    if (!fired) {
-      pendingTimers.add(timer);
+    if (notifyOnTaskComplete) {
+      notifyOnTaskComplete({
+        sessionId: entry.sessionId,
+        cwd: entry.cwd,
+        turnId,
+        lastAgentMessage: payload.last_agent_message || "",
+      });
     }
   }
 
-  function pollFile(filePath, stat, notifyOnTaskComplete) {
-    let entry = tracked.get(filePath);
-    if (!entry) {
-      entry = createTrackedEntry(filePath);
-      if (!entry) return;
-      tracked.set(filePath, entry);
-    }
-
-    if (stat.size <= entry.offset) return;
-
-    const text = entry.partial + readNewBytes(filePath, entry.offset, stat.size);
-    entry.offset = stat.size;
-    const lines = text.split("\n");
-    entry.partial = lines.pop() || "";
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      processLine(line, entry, notifyOnTaskComplete);
-    }
-  }
-
-  function cleanStaleEntries(activeFiles) {
-    for (const [filePath, entry] of tracked) {
-      if (!existsSync(filePath) || !activeFiles.has(filePath)) {
-        tracked.delete(filePath);
-      }
-    }
-  }
-
-  function poll() {
+  function listFiles() {
     const nowMs = now();
-    const activeFiles = new Set();
-    const notifyOnTaskComplete = hasPrimed;
+    const files = [];
 
     for (const dir of getSessionDirs({ sessionDir, now: new Date(nowMs) })) {
-      let files;
+      let fileNames;
       try {
-        files = readdirSync(dir);
+        fileNames = readdirSync(dir);
       } catch {
         continue;
       }
 
-      for (const fileName of files) {
+      for (const fileName of fileNames) {
         if (!fileName.startsWith("rollout-") || !fileName.endsWith(".jsonl")) continue;
-        const filePath = join(dir, fileName);
-
-        let stat;
-        try {
-          stat = statSync(filePath);
-        } catch {
-          continue;
-        }
-
-        activeFiles.add(filePath);
-        pollFile(filePath, stat, notifyOnTaskComplete);
+        files.push(join(dir, fileName));
       }
     }
 
-    cleanStaleEntries(activeFiles);
-    hasPrimed = true;
+    return files;
   }
 
-  let hasPrimed = false;
-
-  return {
+  return createJsonlMonitor({
     pollIntervalMs,
-    tracked,
-    poll,
-    start() {
-      poll();
-      const timer = setInterval(poll, pollIntervalMs);
-      return {
-        stop() {
-          clearInterval(timer);
-          for (const pendingTimer of pendingTimers) {
-            cancel(pendingTimer);
-          }
-          pendingTimers.clear();
-        },
-      };
-    },
-  };
+    completionDelayMs,
+    onTaskComplete,
+    schedule,
+    cancel,
+    createTrackedEntry,
+    listFiles,
+    processLine,
+  });
 }

@@ -13,12 +13,9 @@ AIエージェントがお仕事おわったらずんだもんが叫んでくれ
 ```bash
 mise install      # Node.js と pnpm を召喚するのだ
 pnpm start        # ずんだもんが待機するのだ
-pnpm hook         # Claude Code の設定を書くのだ
 ```
 
-Codex は `pnpm start` 中に sessions を見て、完了を検知したら鳴らすのだ。
-
-設定を書き込まずに中身だけ見たいときは `pnpm hook:show` なのだ。Claude Code 用の `settings.json` の例を見せるのだ。
+`pnpm start` 中は Codex と Claude Code のローカルログをポーリングして、完了を検知したら鳴らすのだ。
 
 黙らせたいときは `pnpm stop` なのだ。でもずんだもんは悲しいのだ。
 

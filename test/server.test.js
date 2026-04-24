@@ -172,6 +172,31 @@ describe("HTTP Server なのだ", () => {
   });
 });
 
+describe("startServer の起動ログなのだ", () => {
+  it("ポート 0 指定でも実際に bind したポートを表示するのだ", async () => {
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    const logs = [];
+
+    console.log = (...args) => {
+      logs.push(args.join(" "));
+    };
+    console.warn = () => {};
+
+    const server = startServer(0);
+    await new Promise((resolve) => server.on("listening", resolve));
+    const address = server.address();
+    const activePort = typeof address === "object" && address ? address.port : 0;
+    await new Promise((resolve) => server.close(resolve));
+
+    console.log = originalLog;
+    console.warn = originalWarn;
+
+    assert.notEqual(activePort, 0);
+    assert.ok(logs.some((line) => line.includes(`http://localhost:${activePort}`)));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // listWavFiles のテストなのだ
 // ---------------------------------------------------------------------------

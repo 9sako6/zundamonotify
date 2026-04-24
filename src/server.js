@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ASSETS_DIR = resolve(__dirname, "..", "assets");
+export const NOTIFICATION_EVENTS = ["stop", "notification"];
+const EVENT_PATH_PATTERN = new RegExp(`^/notifications/(${NOTIFICATION_EVENTS.join("|")})$`);
 
 /** @internal テストから差し替えできるようにしてるのだ */
 export const deps = { execFile };
@@ -17,6 +19,10 @@ const MAX_BODY_BYTES = 1024;
 export const STOP_NOTIFICATION_DEDUP_MS = 5000;
 
 let playing = false;
+
+function getAssetSubdir(event) {
+  return event === "notification" ? "notification" : "stop";
+}
 
 /**
  * 指定ディレクトリから .wav ファイル一覧を取得するのだ
@@ -54,7 +60,7 @@ export function playSound(wavPath) {
  * イベント種別に応じたランダム音声を再生するのだ
  */
 export function playSoundForEvent(event) {
-  const dir = resolve(ASSETS_DIR, event === "notification" ? "notification" : "stop");
+  const dir = resolve(ASSETS_DIR, getAssetSubdir(event));
   const files = listWavFiles(dir);
   if (files.length === 0) {
     console.warn(`⚠ ${dir} に .wav ファイルが見つからないのだ！`);
@@ -76,7 +82,7 @@ function shouldPlayEvent(event, nowMs, recentEventAt) {
 export function startServer(port, { now = () => Date.now() } = {}) {
   const recentEventAt = new Map();
   const server = createServer((req, res) => {
-    const match = req.method === "POST" && req.url?.match(/^\/notifications\/(stop|notification)$/);
+    const match = req.method === "POST" && req.url?.match(EVENT_PATH_PATTERN);
     if (match) {
       const event = match[1];
       let rawBody = "";
@@ -119,7 +125,9 @@ export function startServer(port, { now = () => Date.now() } = {}) {
   server.requestTimeout = 10_000;
 
   server.listen(port, "127.0.0.1", () => {
-    console.log(`ずんだもん通知サーバーが起動したのだ！ http://localhost:${port}`);
+    const address = server.address();
+    const activePort = typeof address === "object" && address ? address.port : port;
+    console.log(`ずんだもん通知サーバーが起動したのだ！ http://localhost:${activePort}`);
     console.log(`POST /notifications/stop         → 完了音声をランダム再生するのだ！`);
     console.log(`POST /notifications/notification  → 通知音声をランダム再生するのだ！`);
 

@@ -9,8 +9,6 @@
   "scripts": {
     "start": "node bin/cli.js",
     "stop": "node bin/cli.js stop",
-    "hook": "node bin/cli.js init -f",
-    "hook:show": "node bin/cli.js init",
     "test": "node --test"
   },
   "engines": {
