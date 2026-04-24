@@ -190,6 +190,7 @@ describe("inspectLaunchAgent", () => {
     const status = await inspectLaunchAgent({
       plistPath,
       target: "gui/501",
+      currentProgramArguments: ["/usr/local/bin/zundamonotify", "serve"],
       probeServer: async () => true,
       runCommand() {},
     });
@@ -214,6 +215,7 @@ describe("inspectLaunchAgent", () => {
     const status = await inspectLaunchAgent({
       plistPath,
       target: "gui/501",
+      currentProgramArguments: ["/usr/local/bin/zundamonotify", "serve"],
       probeServer: async () => false,
       runCommand() {},
     });
@@ -241,11 +243,34 @@ describe("inspectLaunchAgent", () => {
     const status = await inspectLaunchAgent({
       plistPath,
       target: "gui/501",
+      currentProgramArguments: ["/usr/local/bin/zundamonotify", "serve"],
       probeServer: async () => true,
       runCommand() {},
     });
 
     assert.equal(status.ok, false);
     assert.ok(status.issues.includes("invalid_program_arguments"));
+  });
+
+  it("plist の binary が現在の binary と違っていたら issue にするのだ", async () => {
+    const root = makeTmpRoot();
+    const plistPath = resolve(root, "com.9sako6.zundamonotify.plist");
+    installLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      programArguments: ["/old/zundamonotify", "serve"],
+      runCommand() {},
+    });
+
+    const status = await inspectLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      currentProgramArguments: ["/new/zundamonotify", "serve"],
+      probeServer: async () => true,
+      runCommand() {},
+    });
+
+    assert.equal(status.ok, false);
+    assert.ok(status.issues.includes("program_mismatch"));
   });
 });

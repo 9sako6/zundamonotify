@@ -151,6 +151,7 @@ export async function inspectLaunchAgent({
   target = getLaunchdTarget(),
   port = 12378,
   runCommand = execFileSync,
+  currentProgramArguments = getCurrentProgramArguments(),
   probeServer = () => probeNotificationServer({ port }),
 } = {}) {
   const installed = existsSync(plistPath);
@@ -166,6 +167,12 @@ export async function inspectLaunchAgent({
     issues.push("not_installed");
   } else if (programArguments.some((arg) => arg.startsWith("/$bunfs/"))) {
     issues.push("invalid_program_arguments");
+  } else if (
+    programArguments[0] &&
+    currentProgramArguments[0] &&
+    resolve(programArguments[0]) !== resolve(currentProgramArguments[0])
+  ) {
+    issues.push("program_mismatch");
   }
 
   if (installed && !running) {
@@ -182,6 +189,7 @@ export async function inspectLaunchAgent({
     running,
     serverReachable,
     programArguments,
+    currentProgramArguments,
     issues,
     ok: issues.length === 0,
   };

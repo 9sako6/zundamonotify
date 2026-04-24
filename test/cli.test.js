@@ -160,9 +160,17 @@ describe("formatLaunchAgentStatus", () => {
       formatLaunchAgentStatus({
         installed: true,
         ok: true,
+        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        programArguments: ["/Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify"],
+        serverReachable: true,
         issues: [],
       }),
-      ["zundamonotify は自動起動に登録されていて、動いているのだ"],
+      [
+        "zundamonotify は自動起動に登録されていて、動いているのだ",
+        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        "Program: /Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify",
+        "通知サーバー: 接続できるのだ",
+      ],
     );
   });
 
@@ -171,10 +179,16 @@ describe("formatLaunchAgentStatus", () => {
       formatLaunchAgentStatus({
         installed: true,
         ok: false,
+        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        programArguments: ["/Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify"],
+        serverReachable: false,
         issues: ["server_unreachable"],
       }),
       [
         "zundamonotify は自動起動に登録されているけど、動いていないのだ",
+        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        "Program: /Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify",
+        "通知サーバー: 接続できないのだ",
         "⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ",
       ],
     );
@@ -185,11 +199,37 @@ describe("formatLaunchAgentStatus", () => {
       formatLaunchAgentStatus({
         installed: true,
         ok: false,
+        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        programArguments: ["/Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify"],
+        serverReachable: false,
         issues: ["invalid_program_arguments"],
       }),
       [
         "zundamonotify は自動起動に登録されているけど、動いていないのだ",
+        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        "Program: /Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify",
+        "通知サーバー: 接続できないのだ",
         "⚠ LaunchAgent の起動引数が壊れているのだ。もう一度 install してほしいのだ",
+      ],
+    );
+  });
+
+  it("LaunchAgent が別の binary を見ていたら再 install を促すのだ", () => {
+    assert.deepEqual(
+      formatLaunchAgentStatus({
+        installed: true,
+        ok: false,
+        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        programArguments: ["/old/zundamonotify"],
+        serverReachable: true,
+        issues: ["program_mismatch"],
+      }),
+      [
+        "zundamonotify は自動起動に登録されているけど、動いていないのだ",
+        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
+        "Program: /old/zundamonotify",
+        "通知サーバー: 接続できるのだ",
+        "⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。もう一度 install してほしいのだ",
       ],
     );
   });

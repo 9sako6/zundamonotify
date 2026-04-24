@@ -77,13 +77,22 @@ export function formatLaunchAgentStatus(status) {
     return ["zundamonotify は自動起動に登録されていないのだ"];
   }
 
+  const detailLines = [
+    `LaunchAgent: ${status.path ?? "(不明)"}`,
+    `Program: ${status.programArguments?.[0] ?? "(不明)"}`,
+    `通知サーバー: ${status.serverReachable ? "接続できるのだ" : "接続できないのだ"}`,
+  ];
+
   if (status.ok) {
-    return ["zundamonotify は自動起動に登録されていて、動いているのだ"];
+    return ["zundamonotify は自動起動に登録されていて、動いているのだ", ...detailLines];
   }
 
-  const lines = ["zundamonotify は自動起動に登録されているけど、動いていないのだ"];
+  const lines = ["zundamonotify は自動起動に登録されているけど、動いていないのだ", ...detailLines];
   if (status.issues.includes("invalid_program_arguments")) {
     lines.push("⚠ LaunchAgent の起動引数が壊れているのだ。もう一度 install してほしいのだ");
+  }
+  if (status.issues.includes("program_mismatch")) {
+    lines.push("⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。もう一度 install してほしいのだ");
   }
   if (status.issues.includes("server_unreachable")) {
     lines.push("⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ");
