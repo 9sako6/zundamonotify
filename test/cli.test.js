@@ -2,12 +2,16 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentEventNotifier, formatLaunchAgentStatus, startSessionMonitors } from "../bin/cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, "..", "bin", "cli.js");
+const { version: PACKAGE_VERSION } = JSON.parse(
+  readFileSync(resolve(__dirname, "..", "package.json"), "utf-8"),
+);
 
 /**
  * CLI を子プロセスで実行するヘルパーなのだ
@@ -57,13 +61,13 @@ describe("zundamonotify --version", () => {
   it("package version を表示するのだ", async () => {
     const result = await run(["--version"]);
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stdout.trim(), "0.1.5");
+    assert.equal(result.stdout.trim(), PACKAGE_VERSION);
   });
 
   it("-v でも package version を表示するのだ", async () => {
     const result = await run(["-v"]);
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stdout.trim(), "0.1.5");
+    assert.equal(result.stdout.trim(), PACKAGE_VERSION);
   });
 });
 
