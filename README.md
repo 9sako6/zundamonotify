@@ -34,6 +34,18 @@ zundamonotify status
 zundamonotify uninstall
 ```
 
+## 更新なのだ
+
+新しいバージョンを入れた後は、自動起動も今のバイナリに向け直すのだ。
+
+```bash
+mise install github:9sako6/zundamonotify@vX.Y.Z
+zundamonotify install
+zundamonotify status
+```
+
+`install` は自動起動の登録と更新を兼ねるのだ。
+
 ## ライセンスなのだ
 
 ### VOICEVOX
