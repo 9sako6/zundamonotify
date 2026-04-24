@@ -7,6 +7,7 @@ import {
   buildLaunchAgentPlist,
   getCurrentProgramArguments,
   getLaunchAgentStatus,
+  inspectLaunchAgent,
   installLaunchAgent,
   uninstallLaunchAgent,
 } from "../src/launchd.js";
@@ -172,5 +173,79 @@ describe("getLaunchAgentStatus", () => {
 
     assert.equal(status.installed, false);
     assert.equal(status.running, false);
+  });
+});
+
+describe("inspectLaunchAgent", () => {
+  it("plist と launchd と HTTP が正常なら ok なのだ", async () => {
+    const root = makeTmpRoot();
+    const plistPath = resolve(root, "com.9sako6.zundamonotify.plist");
+    installLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      programArguments: ["/usr/local/bin/zundamonotify", "serve"],
+      runCommand() {},
+    });
+
+    const status = await inspectLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      probeServer: async () => true,
+      runCommand() {},
+    });
+
+    assert.equal(status.ok, true);
+    assert.equal(status.installed, true);
+    assert.equal(status.running, true);
+    assert.equal(status.serverReachable, true);
+    assert.deepEqual(status.issues, []);
+  });
+
+  it("launchd が動いていても HTTP に届かなければ issue にするのだ", async () => {
+    const root = makeTmpRoot();
+    const plistPath = resolve(root, "com.9sako6.zundamonotify.plist");
+    installLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      programArguments: ["/usr/local/bin/zundamonotify", "serve"],
+      runCommand() {},
+    });
+
+    const status = await inspectLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      probeServer: async () => false,
+      runCommand() {},
+    });
+
+    assert.equal(status.ok, false);
+    assert.equal(status.running, true);
+    assert.equal(status.serverReachable, false);
+    assert.ok(status.issues.includes("server_unreachable"));
+  });
+
+  it("plist に Bun 仮想 path が混ざっていたら issue にするのだ", async () => {
+    const root = makeTmpRoot();
+    const plistPath = resolve(root, "com.9sako6.zundamonotify.plist");
+    installLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      programArguments: [
+        "/usr/local/bin/zundamonotify",
+        "/$bunfs/root/zundamonotify-macos-arm64",
+        "serve",
+      ],
+      runCommand() {},
+    });
+
+    const status = await inspectLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      probeServer: async () => true,
+      runCommand() {},
+    });
+
+    assert.equal(status.ok, false);
+    assert.ok(status.issues.includes("invalid_program_arguments"));
   });
 });

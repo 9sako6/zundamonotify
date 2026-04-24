@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 
@@ -74,6 +74,40 @@ function runLaunchctl(args, { runCommand = execFileSync, allowFailure = false } 
   }
 }
 
+function readProgramArguments(plistPath) {
+  let plist;
+  try {
+    plist = readFileSync(plistPath, "utf-8");
+  } catch {
+    return [];
+  }
+
+  const array = plist.match(/<key>ProgramArguments<\/key>\s*<array>(?<body>[\s\S]*?)<\/array>/)?.groups?.body;
+  if (!array) return [];
+
+  return [...array.matchAll(/<string>(?<value>[\s\S]*?)<\/string>/g)].map((match) =>
+    match.groups.value
+      .replaceAll("&apos;", "'")
+      .replaceAll("&quot;", '"')
+      .replaceAll("&gt;", ">")
+      .replaceAll("&lt;", "<")
+      .replaceAll("&amp;", "&"),
+  );
+}
+
+async function probeNotificationServer({ port = 12378, request = fetch } = {}) {
+  try {
+    const res = await request(`http://127.0.0.1:${port}/agent-events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "approval_review.completed", source: "status" }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function installLaunchAgent({
   plistPath = LAUNCH_AGENT_PATH,
   target = getLaunchdTarget(),
@@ -110,6 +144,47 @@ export function getLaunchAgentStatus({
     allowFailure: true,
   });
   return { label: LAUNCHD_LABEL, path: plistPath, target, installed, running };
+}
+
+export async function inspectLaunchAgent({
+  plistPath = LAUNCH_AGENT_PATH,
+  target = getLaunchdTarget(),
+  port = 12378,
+  runCommand = execFileSync,
+  probeServer = () => probeNotificationServer({ port }),
+} = {}) {
+  const installed = existsSync(plistPath);
+  const running = runLaunchctl(["print", `${target}/${LAUNCHD_LABEL}`], {
+    runCommand,
+    allowFailure: true,
+  });
+  const programArguments = installed ? readProgramArguments(plistPath) : [];
+  const serverReachable = running ? await probeServer() : false;
+  const issues = [];
+
+  if (!installed) {
+    issues.push("not_installed");
+  } else if (programArguments.some((arg) => arg.startsWith("/$bunfs/"))) {
+    issues.push("invalid_program_arguments");
+  }
+
+  if (installed && !running) {
+    issues.push("not_running");
+  } else if (running && !serverReachable) {
+    issues.push("server_unreachable");
+  }
+
+  return {
+    label: LAUNCHD_LABEL,
+    path: plistPath,
+    target,
+    installed,
+    running,
+    serverReachable,
+    programArguments,
+    issues,
+    ok: issues.length === 0,
+  };
 }
 
 export function describeProgram(programArguments = getCurrentProgramArguments()) {

@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentEventNotifier, startSessionMonitors } from "../bin/cli.js";
+import { createAgentEventNotifier, formatLaunchAgentStatus, startSessionMonitors } from "../bin/cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, "..", "bin", "cli.js");
@@ -137,6 +137,47 @@ describe("startSessionMonitors", () => {
       ["claude", 12378],
     ]);
     assert.equal(handles.length, 2);
+  });
+});
+
+describe("formatLaunchAgentStatus", () => {
+  it("正常なら動いていると表示するのだ", () => {
+    assert.deepEqual(
+      formatLaunchAgentStatus({
+        installed: true,
+        ok: true,
+        issues: [],
+      }),
+      ["zundamonotify は自動起動に登録されていて、動いているのだ"],
+    );
+  });
+
+  it("通知サーバーに届かなければ具体的に表示するのだ", () => {
+    assert.deepEqual(
+      formatLaunchAgentStatus({
+        installed: true,
+        ok: false,
+        issues: ["server_unreachable"],
+      }),
+      [
+        "zundamonotify は自動起動に登録されているけど、動いていないのだ",
+        "⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ",
+      ],
+    );
+  });
+
+  it("LaunchAgent の起動引数が壊れていたら再 install を促すのだ", () => {
+    assert.deepEqual(
+      formatLaunchAgentStatus({
+        installed: true,
+        ok: false,
+        issues: ["invalid_program_arguments"],
+      }),
+      [
+        "zundamonotify は自動起動に登録されているけど、動いていないのだ",
+        "⚠ LaunchAgent の起動引数が壊れているのだ。もう一度 install してほしいのだ",
+      ],
+    );
   });
 });
 

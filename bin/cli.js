@@ -7,7 +7,7 @@ import { createCodexSessionsMonitor } from "../src/codex-monitor.js";
 import { createClaudeCodeSessionsMonitor } from "../src/claude-code-monitor.js";
 import { startServer } from "../src/server.js";
 import {
-  getLaunchAgentStatus,
+  inspectLaunchAgent,
   installLaunchAgent,
   uninstallLaunchAgent,
 } from "../src/launchd.js";
@@ -64,6 +64,28 @@ export function startSessionMonitors(port, starters = MONITOR_STARTERS) {
   return starters.map((start) => start(port));
 }
 
+export function formatLaunchAgentStatus(status) {
+  if (!status.installed) {
+    return ["zundamonotify は自動起動に登録されていないのだ"];
+  }
+
+  if (status.ok) {
+    return ["zundamonotify は自動起動に登録されていて、動いているのだ"];
+  }
+
+  const lines = ["zundamonotify は自動起動に登録されているけど、動いていないのだ"];
+  if (status.issues.includes("invalid_program_arguments")) {
+    lines.push("⚠ LaunchAgent の起動引数が壊れているのだ。もう一度 install してほしいのだ");
+  }
+  if (status.issues.includes("server_unreachable")) {
+    lines.push("⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ");
+  }
+  if (status.issues.includes("not_running")) {
+    lines.push("⚠ launchd には登録されているけど、job が起動していないのだ");
+  }
+  return lines;
+}
+
 export async function main() {
   const command = process.argv[2];
 
@@ -102,13 +124,9 @@ export async function main() {
     }
 
     case "status": {
-      const status = getLaunchAgentStatus();
-      if (!status.installed) {
-        console.log("zundamonotify は自動起動に登録されていないのだ");
-      } else if (status.running) {
-        console.log("zundamonotify は自動起動に登録されていて、動いているのだ");
-      } else {
-        console.log("zundamonotify は自動起動に登録されているけど、動いていないのだ");
+      const status = await inspectLaunchAgent();
+      for (const line of formatLaunchAgentStatus(status)) {
+        console.log(line);
       }
       break;
     }
