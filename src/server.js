@@ -3,7 +3,6 @@ import { execFile } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_VOLUME_PERCENT, parseVolumePercent } from "./integrations.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ASSETS_DIR = resolve(__dirname, "..", "assets");
@@ -15,6 +14,7 @@ const RES_OK = JSON.stringify({ ok: true });
 const RES_NOT_FOUND = JSON.stringify({ error: "Not Found" });
 const RES_PAYLOAD_TOO_LARGE = JSON.stringify({ error: "Payload Too Large" });
 const MAX_BODY_BYTES = 1024;
+export const STOP_NOTIFICATION_DEDUP_MS = 5000;
 
 let playing = false;
 
@@ -38,27 +38,11 @@ export function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-export function volumePercentToPlayerValue(volumePercent = DEFAULT_VOLUME_PERCENT) {
-  const normalized = parseVolumePercent(volumePercent) ?? DEFAULT_VOLUME_PERCENT;
-  return String(Number((normalized / 100).toFixed(2)));
-}
-
-function parseNotificationPayload(rawBody) {
-  if (!rawBody) return {};
-
-  try {
-    const parsed = JSON.parse(rawBody);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-export function playSound(wavPath, volumePercent = DEFAULT_VOLUME_PERCENT) {
+export function playSound(wavPath) {
   if (playing) return;
 
   playing = true;
-  deps.execFile("afplay", ["-v", volumePercentToPlayerValue(volumePercent), wavPath], (err) => {
+  deps.execFile("afplay", [wavPath], (err) => {
     playing = false;
     if (err) {
       console.error("⚠ 再生に失敗したのだ！ずんだもんの声が出せないのだ！:", err.message);
@@ -69,17 +53,28 @@ export function playSound(wavPath, volumePercent = DEFAULT_VOLUME_PERCENT) {
 /**
  * イベント種別に応じたランダム音声を再生するのだ
  */
-export function playSoundForEvent(event, { volumePercent = DEFAULT_VOLUME_PERCENT } = {}) {
+export function playSoundForEvent(event) {
   const dir = resolve(ASSETS_DIR, event === "notification" ? "notification" : "stop");
   const files = listWavFiles(dir);
   if (files.length === 0) {
     console.warn(`⚠ ${dir} に .wav ファイルが見つからないのだ！`);
     return;
   }
-  playSound(pickRandom(files), volumePercent);
+  playSound(pickRandom(files));
 }
 
-export function startServer(port) {
+function shouldPlayEvent(event, nowMs, recentEventAt) {
+  if (event !== "stop") return true;
+  const lastPlayedAt = recentEventAt.get(event);
+  if (lastPlayedAt !== undefined && nowMs - lastPlayedAt < STOP_NOTIFICATION_DEDUP_MS) {
+    return false;
+  }
+  recentEventAt.set(event, nowMs);
+  return true;
+}
+
+export function startServer(port, { now = () => Date.now() } = {}) {
+  const recentEventAt = new Map();
   const server = createServer((req, res) => {
     const match = req.method === "POST" && req.url?.match(/^\/notifications\/(stop|notification)$/);
     if (match) {
@@ -98,11 +93,11 @@ export function startServer(port) {
       });
       req.on("end", () => {
         if (aborted) return;
-        const payload = parseNotificationPayload(rawBody);
-        const volumePercent = parseVolumePercent(payload.volume) ?? DEFAULT_VOLUME_PERCENT;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(RES_OK);
-        playSoundForEvent(event, { volumePercent });
+        if (shouldPlayEvent(event, now(), recentEventAt)) {
+          playSoundForEvent(event);
+        }
       });
       return;
     }

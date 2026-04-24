@@ -10,6 +10,7 @@ import {
   listWavFiles,
   pickRandom,
   ASSETS_DIR,
+  STOP_NOTIFICATION_DEDUP_MS,
   deps,
 } from "../src/server.js";
 
@@ -35,11 +36,17 @@ async function request(port, method, path, init = {}) {
 describe("HTTP Server なのだ", () => {
   let server;
   let port;
+  let nowMs;
 
   before(async () => {
-    server = startServer(0);
+    nowMs = Date.parse("2026-04-24T12:00:00.000Z");
+    server = startServer(0, { now: () => nowMs });
     await new Promise((resolve) => server.on("listening", resolve));
     port = server.address().port;
+  });
+
+  beforeEach(() => {
+    nowMs += STOP_NOTIFICATION_DEDUP_MS + 1000;
   });
 
   after(() => {
@@ -112,6 +119,22 @@ describe("HTTP Server なのだ", () => {
     }
   });
 
+  it("近接した stop 通知は 1 回だけ鳴らすのだ", async () => {
+    const before = execFileCalls.length;
+
+    const first = await request(port, "POST", "/notifications/stop");
+    const second = await request(port, "POST", "/notifications/stop");
+
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(execFileCalls.length, before + 1);
+
+    nowMs += STOP_NOTIFICATION_DEDUP_MS + 1;
+    const third = await request(port, "POST", "/notifications/stop");
+    assert.equal(third.status, 200);
+    assert.equal(execFileCalls.length, before + 2);
+  });
+
   it("巨大なボディを送ったら 413 で拒否するのだ、ずんだもんにも限界があるのだ", async () => {
     const hugeBody = "x".repeat(2048);
     const res = await fetch(`http://localhost:${port}/notifications/stop`, {
@@ -133,11 +156,11 @@ describe("HTTP Server なのだ", () => {
     assert.deepEqual(res.body, { ok: true });
   });
 
-  it("POST /notifications/stop に volume を送るとその音量でしゃべるのだ", async () => {
+  it("POST /notifications/stop はボディを無視して再生するのだ", async () => {
     const before = execFileCalls.length;
     const res = await request(port, "POST", "/notifications/stop", {
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ volume: 75 }),
+      body: JSON.stringify({ ignored: true }),
     });
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { ok: true });
@@ -145,7 +168,7 @@ describe("HTTP Server なのだ", () => {
 
     const [cmd, args] = execFileCalls.at(-1);
     assert.equal(cmd, "afplay");
-    assert.deepEqual(args.slice(0, 2), ["-v", "0.75"]);
+    assert.equal(args.at(-1).endsWith(".wav"), true);
   });
 });
 
@@ -204,22 +227,7 @@ describe("playSound なのだ", () => {
     assert.equal(execFileCalls.length, before + 1);
     const [cmd, args] = execFileCalls.at(-1);
     assert.equal(cmd, "afplay");
-    assert.deepEqual(args, ["-v", "1", tmpWav]);
-
-    unlinkSync(tmpWav);
-  });
-
-  it("音量を指定して afplay に渡せるのだ", () => {
-    const tmpWav = join(tmpdir(), "zundamonotify-test-volume.wav");
-    writeFileSync(tmpWav, "RIFF dummy");
-
-    const before = execFileCalls.length;
-    playSound(tmpWav, 25);
-
-    assert.equal(execFileCalls.length, before + 1);
-    const [cmd, args] = execFileCalls.at(-1);
-    assert.equal(cmd, "afplay");
-    assert.deepEqual(args, ["-v", "0.25", tmpWav]);
+    assert.deepEqual(args, [tmpWav]);
 
     unlinkSync(tmpWav);
   });
@@ -259,8 +267,8 @@ describe("playSoundForEvent なのだ", () => {
     assert.equal(execFileCalls.length, before + 1);
     const [cmd, args] = execFileCalls.at(-1);
     assert.equal(cmd, "afplay");
-    assert.deepEqual(args.slice(0, 2), ["-v", "1"]);
-    assert.match(args[2], /assets[/\\]stop[/\\].*\.wav$/);
+    assert.equal(args.length, 1);
+    assert.match(args[0], /assets[/\\]stop[/\\].*\.wav$/);
   });
 
   it("notification イベントで assets/notification/ の wav を再生するのだ", () => {
@@ -269,8 +277,8 @@ describe("playSoundForEvent なのだ", () => {
     assert.equal(execFileCalls.length, before + 1);
     const [cmd, args] = execFileCalls.at(-1);
     assert.equal(cmd, "afplay");
-    assert.deepEqual(args.slice(0, 2), ["-v", "1"]);
-    assert.match(args[2], /assets[/\\]notification[/\\].*\.wav$/);
+    assert.equal(args.length, 1);
+    assert.match(args[0], /assets[/\\]notification[/\\].*\.wav$/);
   });
 
   it("ASSETS_DIR はプロジェクトの assets/ を指してるのだ", () => {
