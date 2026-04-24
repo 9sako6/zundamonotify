@@ -7,6 +7,12 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ASSETS_DIR = resolve(__dirname, "..", "assets");
 export const NOTIFICATION_EVENTS = ["stop", "notification"];
+export const AGENT_EVENT_TYPES = [
+  "agent_turn.completed",
+  "approval_review.completed",
+  "tool_call.completed",
+  "alert.requested",
+];
 const EVENT_PATH_PATTERN = new RegExp(`^/notifications/(${NOTIFICATION_EVENTS.join("|")})$`);
 
 /** @internal テストから差し替えできるようにしてるのだ */
@@ -14,6 +20,7 @@ export const deps = { execFile };
 
 const RES_OK = JSON.stringify({ ok: true });
 const RES_NOT_FOUND = JSON.stringify({ error: "Not Found" });
+const RES_BAD_REQUEST = JSON.stringify({ error: "Bad Request" });
 const RES_PAYLOAD_TOO_LARGE = JSON.stringify({ error: "Payload Too Large" });
 const MAX_BODY_BYTES = 1024;
 export const STOP_NOTIFICATION_DEDUP_MS = 5000;
@@ -23,6 +30,12 @@ let bundledAssetFiles = null;
 
 function getAssetSubdir(event) {
   return event === "notification" ? "notification" : "stop";
+}
+
+function getNotificationEventForAgentEventType(type) {
+  if (type === "agent_turn.completed") return "stop";
+  if (type === "alert.requested") return "notification";
+  return null;
 }
 
 export function setBundledAssetFiles(filesByEvent) {
@@ -84,30 +97,75 @@ function shouldPlayEvent(event, nowMs, recentEventAt) {
   return true;
 }
 
+function readRequestBody(req, res, onBody) {
+  let rawBody = "";
+  let aborted = false;
+  req.setEncoding("utf-8");
+  req.on("data", (chunk) => {
+    rawBody += chunk;
+    if (rawBody.length > MAX_BODY_BYTES) {
+      aborted = true;
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(RES_PAYLOAD_TOO_LARGE);
+      req.destroy();
+    }
+  });
+  req.on("end", () => {
+    if (!aborted) onBody(rawBody);
+  });
+}
+
+function respondOk(res) {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(RES_OK);
+}
+
+function respondBadRequest(res) {
+  res.writeHead(400, { "Content-Type": "application/json" });
+  res.end(RES_BAD_REQUEST);
+}
+
+function parseAgentEvent(rawBody) {
+  let event;
+  try {
+    event = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+
+  if (!event || typeof event !== "object" || !AGENT_EVENT_TYPES.includes(event.type)) {
+    return null;
+  }
+  return event;
+}
+
 export function startServer(port, { now = () => Date.now() } = {}) {
   const recentEventAt = new Map();
   const server = createServer((req, res) => {
     const match = req.method === "POST" && req.url?.match(EVENT_PATH_PATTERN);
     if (match) {
       const event = match[1];
-      let rawBody = "";
-      let aborted = false;
-      req.setEncoding("utf-8");
-      req.on("data", (chunk) => {
-        rawBody += chunk;
-        if (rawBody.length > MAX_BODY_BYTES) {
-          aborted = true;
-          res.writeHead(413, { "Content-Type": "application/json" });
-          res.end(RES_PAYLOAD_TOO_LARGE);
-          req.destroy();
-        }
-      });
-      req.on("end", () => {
-        if (aborted) return;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(RES_OK);
+      readRequestBody(req, res, () => {
+        respondOk(res);
         if (shouldPlayEvent(event, now(), recentEventAt)) {
           playSoundForEvent(event);
+        }
+      });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/agent-events") {
+      readRequestBody(req, res, (rawBody) => {
+        const event = parseAgentEvent(rawBody);
+        if (!event) {
+          respondBadRequest(res);
+          return;
+        }
+
+        respondOk(res);
+        const notificationEvent = getNotificationEventForAgentEventType(event.type);
+        if (notificationEvent && shouldPlayEvent(notificationEvent, now(), recentEventAt)) {
+          playSoundForEvent(notificationEvent);
         }
       });
       return;
@@ -133,8 +191,7 @@ export function startServer(port, { now = () => Date.now() } = {}) {
     const address = server.address();
     const activePort = typeof address === "object" && address ? address.port : port;
     console.log(`ずんだもん通知サーバーが起動したのだ！ http://localhost:${activePort}`);
-    console.log(`POST /notifications/stop         → 完了音声をランダム再生するのだ！`);
-    console.log(`POST /notifications/notification  → 通知音声をランダム再生するのだ！`);
+    console.log(`POST /agent-events  → AIエージェントのイベントを受け取るのだ！`);
 
     const stopFiles = bundledAssetFiles?.stop ?? listWavFiles(resolve(ASSETS_DIR, "stop"));
     const notifFiles = bundledAssetFiles?.notification ?? listWavFiles(resolve(ASSETS_DIR, "notification"));

@@ -66,6 +66,72 @@ describe("HTTP Server なのだ", () => {
     assert.deepEqual(res.body, { ok: true });
   });
 
+  it("POST /agent-events で agent_turn.completed を受けたら完了音声を鳴らすのだ", async () => {
+    const before = execFileCalls.length;
+    const res = await request(port, "POST", "/agent-events", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "agent_turn.completed",
+        source: "codex",
+        sessionId: "codex:session-1",
+        turnId: "turn-1",
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true });
+    assert.equal(execFileCalls.length, before + 1);
+
+    const [cmd, args] = execFileCalls.at(-1);
+    assert.equal(cmd, "afplay");
+    assert.match(args[0], /assets[/\\]stop[/\\].*\.wav$/);
+  });
+
+  it("POST /agent-events で approval_review.completed を受けても音声は鳴らさないのだ", async () => {
+    const before = execFileCalls.length;
+    const res = await request(port, "POST", "/agent-events", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "approval_review.completed",
+        source: "codex",
+        sessionId: "codex:guardian-session",
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true });
+    assert.equal(execFileCalls.length, before);
+  });
+
+  it("POST /agent-events で alert.requested を受けたら通知音声を鳴らすのだ", async () => {
+    const before = execFileCalls.length;
+    const res = await request(port, "POST", "/agent-events", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "alert.requested",
+        source: "external",
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true });
+    assert.equal(execFileCalls.length, before + 1);
+
+    const [cmd, args] = execFileCalls.at(-1);
+    assert.equal(cmd, "afplay");
+    assert.match(args[0], /assets[/\\]notification[/\\].*\.wav$/);
+  });
+
+  it("POST /agent-events の type が知らない値なら 400 なのだ", async () => {
+    const res = await request(port, "POST", "/agent-events", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "unknown.happened" }),
+    });
+
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.body, { error: "Bad Request" });
+  });
+
   it("POST /notifications（イベントなし）は 404 なのだ", async () => {
     const res = await request(port, "POST", "/notifications");
     assert.equal(res.status, 404);

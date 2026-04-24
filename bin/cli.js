@@ -24,27 +24,38 @@ zundamonotify - ずんだもんの声でAIエージェントの完了をお知�
   zundamonotify serve --port <number>  通知サーバーを前景で起動するのだ
 `.trim();
 
-function createStopNotifier(port) {
-  return async function notifyStop() {
+export function createAgentEventNotifier(port, source) {
+  return async function notifyAgentEvent(event = {}) {
     try {
-      await fetch(`http://127.0.0.1:${port}/notifications/stop`, { method: "POST" });
+      await fetch(`http://127.0.0.1:${port}/agent-events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "agent_turn.completed",
+          source,
+          sessionId: event.sessionId,
+          cwd: event.cwd,
+          turnId: event.turnId,
+          message: event.lastAgentMessage,
+        }),
+      });
     } catch {}
   };
 }
 
-function startMonitor(factory, port) {
+function startMonitor(factory, port, source) {
   const monitor = factory({
-    onTaskComplete: createStopNotifier(port),
+    onTaskComplete: createAgentEventNotifier(port, source),
   });
   return monitor.start();
 }
 
 function startCodexMonitor(port) {
-  return startMonitor(createCodexSessionsMonitor, port);
+  return startMonitor(createCodexSessionsMonitor, port, "codex");
 }
 
 function startClaudeCodeMonitor(port) {
-  return startMonitor(createClaudeCodeSessionsMonitor, port);
+  return startMonitor(createClaudeCodeSessionsMonitor, port, "claude-code");
 }
 
 export const MONITOR_STARTERS = [startCodexMonitor, startClaudeCodeMonitor];

@@ -1,9 +1,10 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startSessionMonitors } from "../bin/cli.js";
+import { createAgentEventNotifier, startSessionMonitors } from "../bin/cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, "..", "bin", "cli.js");
@@ -136,5 +137,54 @@ describe("startSessionMonitors", () => {
       ["claude", 12378],
     ]);
     assert.equal(handles.length, 2);
+  });
+});
+
+describe("createAgentEventNotifier", () => {
+  it("agent_turn.completed を /agent-events に POST するのだ", async () => {
+    const requests = [];
+    const server = createServer((req, res) => {
+      let rawBody = "";
+      req.setEncoding("utf-8");
+      req.on("data", (chunk) => {
+        rawBody += chunk;
+      });
+      req.on("end", () => {
+        requests.push({
+          method: req.method,
+          url: req.url,
+          body: JSON.parse(rawBody),
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+
+    try {
+      const notify = createAgentEventNotifier(port, "claude-code");
+      await notify({
+        sessionId: "claude-code:session-1",
+        cwd: "/tmp/project",
+        turnId: "turn-1",
+        lastAgentMessage: "done",
+      });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].method, "POST");
+    assert.equal(requests[0].url, "/agent-events");
+    assert.deepEqual(requests[0].body, {
+      type: "agent_turn.completed",
+      source: "claude-code",
+      sessionId: "claude-code:session-1",
+      cwd: "/tmp/project",
+      turnId: "turn-1",
+      message: "done",
+    });
   });
 });
