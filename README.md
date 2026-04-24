@@ -1,6 +1,6 @@
 # zundamonotify
 
-AIエージェントがお仕事おわったらずんだもんが叫んでくれるやつなのだ！もうターミナルをガン見しなくていいのだ！Mac 専用なのだ！ごめんなのだ！
+Codex と Claude Code の完了を、ずんだもんの音声で知らせる Mac 用ツールなのだ。
 
 ## 対応環境なのだ
 
@@ -8,7 +8,13 @@ AIエージェントがお仕事おわったらずんだもんが叫んでくれ
 - Claude Code
 - Codex
 
-## 使い方なのだ
+## インストールなのだ
+
+```bash
+mise use -g github:9sako6/zundamonotify
+```
+
+## 自動起動なのだ
 
 ```bash
 zundamonotify install
@@ -16,13 +22,13 @@ zundamonotify install
 
 これでログイン時に自動起動するのだ。Codex と Claude Code のローカルログをポーリングして、完了を検知したら鳴らすのだ。
 
-状態を見るときはこれなのだ。
+状態を見るのだ。
 
 ```bash
 zundamonotify status
 ```
 
-黙らせたいときはこれなのだ。でもずんだもんは悲しいのだ。
+自動起動を解除するのだ。
 
 ```bash
 zundamonotify uninstall

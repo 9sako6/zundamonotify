@@ -19,9 +19,14 @@ const MAX_BODY_BYTES = 1024;
 export const STOP_NOTIFICATION_DEDUP_MS = 5000;
 
 let playing = false;
+let bundledAssetFiles = null;
 
 function getAssetSubdir(event) {
   return event === "notification" ? "notification" : "stop";
+}
+
+export function setBundledAssetFiles(filesByEvent) {
+  bundledAssetFiles = filesByEvent;
 }
 
 /**
@@ -61,7 +66,7 @@ export function playSound(wavPath) {
  */
 export function playSoundForEvent(event) {
   const dir = resolve(ASSETS_DIR, getAssetSubdir(event));
-  const files = listWavFiles(dir);
+  const files = bundledAssetFiles?.[event] ?? listWavFiles(dir);
   if (files.length === 0) {
     console.warn(`⚠ ${dir} に .wav ファイルが見つからないのだ！`);
     return;
@@ -131,8 +136,8 @@ export function startServer(port, { now = () => Date.now() } = {}) {
     console.log(`POST /notifications/stop         → 完了音声をランダム再生するのだ！`);
     console.log(`POST /notifications/notification  → 通知音声をランダム再生するのだ！`);
 
-    const stopFiles = listWavFiles(resolve(ASSETS_DIR, "stop"));
-    const notifFiles = listWavFiles(resolve(ASSETS_DIR, "notification"));
+    const stopFiles = bundledAssetFiles?.stop ?? listWavFiles(resolve(ASSETS_DIR, "stop"));
+    const notifFiles = bundledAssetFiles?.notification ?? listWavFiles(resolve(ASSETS_DIR, "notification"));
     console.log(`🔊 stop: ${stopFiles.length}本, notification: ${notifFiles.length}本 の音声があるのだ！`);
 
     if (stopFiles.length === 0 || notifFiles.length === 0) {

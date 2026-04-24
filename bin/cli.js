@@ -53,7 +53,7 @@ export function startSessionMonitors(port, starters = MONITOR_STARTERS) {
   return starters.map((start) => start(port));
 }
 
-async function main() {
+export async function main() {
   const command = process.argv[2];
 
   switch (command) {

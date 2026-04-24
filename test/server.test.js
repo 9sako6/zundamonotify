@@ -12,6 +12,7 @@ import {
   ASSETS_DIR,
   STOP_NOTIFICATION_DEDUP_MS,
   deps,
+  setBundledAssetFiles,
 } from "../src/server.js";
 
 // afplay を実行させないように deps.execFile を差し替えるのだ
@@ -304,6 +305,25 @@ describe("playSoundForEvent なのだ", () => {
     assert.equal(cmd, "afplay");
     assert.equal(args.length, 1);
     assert.match(args[0], /assets[/\\]notification[/\\].*\.wav$/);
+  });
+
+  it("単一バイナリ用の bundled assets があればそれを再生するのだ", () => {
+    const bundledWav = join(tmpdir(), "zundamonotify-bundled.wav");
+    writeFileSync(bundledWav, "RIFF dummy");
+
+    try {
+      setBundledAssetFiles({ stop: [bundledWav], notification: [] });
+      const before = execFileCalls.length;
+      playSoundForEvent("stop");
+
+      assert.equal(execFileCalls.length, before + 1);
+      const [cmd, args] = execFileCalls.at(-1);
+      assert.equal(cmd, "afplay");
+      assert.deepEqual(args, [bundledWav]);
+    } finally {
+      setBundledAssetFiles(null);
+      unlinkSync(bundledWav);
+    }
   });
 
   it("ASSETS_DIR はプロジェクトの assets/ を指してるのだ", () => {

@@ -7,6 +7,7 @@
     "zundamonotify": "./bin/cli.js"
   },
   "scripts": {
+    "build": "bun build ./bin/bun-entry.js --compile --target=bun-darwin-arm64 --outfile ./dist/zundamonotify-macos-arm64",
     "serve": "node bin/cli.js serve",
     "test": "node --test"
   },
