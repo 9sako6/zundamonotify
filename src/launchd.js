@@ -25,7 +25,7 @@ export function getCurrentProgramArguments({
   scriptPath = process.argv[1],
 } = {}) {
   const args = [resolve(execPath)];
-  if (scriptPath && resolve(scriptPath) !== resolve(execPath)) {
+  if (scriptPath && !scriptPath.startsWith("/$bunfs/") && resolve(scriptPath) !== resolve(execPath)) {
     args.push(resolve(scriptPath));
   }
   args.push("serve");

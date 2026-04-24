@@ -75,6 +75,16 @@ describe("getCurrentProgramArguments", () => {
       ["/usr/local/bin/zundamonotify", "serve"],
     );
   });
+
+  it("Bun 単一バイナリの仮想 script path は LaunchAgent に入れないのだ", () => {
+    assert.deepEqual(
+      getCurrentProgramArguments({
+        execPath: "/usr/local/bin/zundamonotify",
+        scriptPath: "/$bunfs/root/zundamonotify-macos-arm64",
+      }),
+      ["/usr/local/bin/zundamonotify", "serve"],
+    );
+  });
 });
 
 describe("installLaunchAgent", () => {
