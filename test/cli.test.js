@@ -233,7 +233,27 @@ describe("formatLaunchAgentStatus", () => {
         "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
         "Program: /old/zundamonotify",
         "通知サーバー: 接続できるのだ",
-        "⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。もう一度 install してほしいのだ",
+        "⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。自動起動の設定を更新してほしいのだ",
+      ],
+    );
+  });
+
+  it("別の仕組みが登録した LaunchAgent は label を表示するのだ", () => {
+    assert.deepEqual(
+      formatLaunchAgentStatus({
+        installed: true,
+        ok: true,
+        label: "com.9sako6.zundamonotify",
+        path: null,
+        programArguments: [],
+        serverReachable: true,
+        issues: [],
+      }),
+      [
+        "zundamonotify は自動起動に登録されていて、動いているのだ",
+        "LaunchAgent: com.9sako6.zundamonotify",
+        "Program: (不明)",
+        "通知サーバー: 接続できるのだ",
       ],
     );
   });

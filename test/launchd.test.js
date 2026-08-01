@@ -174,6 +174,22 @@ describe("getLaunchAgentStatus", () => {
     assert.equal(status.installed, false);
     assert.equal(status.running, false);
   });
+
+  it("別の仕組みが登録した LaunchAgent も installed として返すのだ", () => {
+    const root = makeTmpRoot();
+    const plistPath = resolve(root, "com.9sako6.zundamonotify.plist");
+
+    const status = getLaunchAgentStatus({
+      plistPath,
+      target: "gui/501",
+      runCommand() {},
+    });
+
+    assert.equal(status.installed, true);
+    assert.equal(status.running, true);
+    assert.equal(status.registration, "launchd");
+    assert.equal(status.path, null);
+  });
 });
 
 describe("inspectLaunchAgent", () => {
@@ -272,5 +288,26 @@ describe("inspectLaunchAgent", () => {
 
     assert.equal(status.ok, false);
     assert.ok(status.issues.includes("program_mismatch"));
+  });
+
+  it("別の仕組みが登録した LaunchAgent でも疎通できれば ok なのだ", async () => {
+    const root = makeTmpRoot();
+    const plistPath = resolve(root, "com.9sako6.zundamonotify.plist");
+
+    const status = await inspectLaunchAgent({
+      plistPath,
+      target: "gui/501",
+      currentProgramArguments: ["/nix/store/example/bin/zundamonotify", "serve"],
+      probeServer: async () => true,
+      runCommand() {},
+    });
+
+    assert.equal(status.ok, true);
+    assert.equal(status.installed, true);
+    assert.equal(status.running, true);
+    assert.equal(status.registration, "launchd");
+    assert.equal(status.path, null);
+    assert.deepEqual(status.programArguments, []);
+    assert.deepEqual(status.issues, []);
   });
 });

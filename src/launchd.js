@@ -74,6 +74,19 @@ function runLaunchctl(args, { runCommand = execFileSync, allowFailure = false } 
   }
 }
 
+function getLaunchAgentRegistration(plistPath, running) {
+  const plistExists = existsSync(plistPath);
+  const registration = plistExists ? "plist" : running ? "launchd" : "none";
+  return {
+    plistExists,
+    status: {
+      installed: registration !== "none",
+      path: plistExists ? plistPath : null,
+      registration,
+    },
+  };
+}
+
 function readProgramArguments(plistPath) {
   let plist;
   try {
@@ -138,12 +151,17 @@ export function getLaunchAgentStatus({
   target = getLaunchdTarget(),
   runCommand = execFileSync,
 } = {}) {
-  const installed = existsSync(plistPath);
   const running = runLaunchctl(["print", `${target}/${LAUNCHD_LABEL}`], {
     runCommand,
     allowFailure: true,
   });
-  return { label: LAUNCHD_LABEL, path: plistPath, target, installed, running };
+  const registration = getLaunchAgentRegistration(plistPath, running);
+  return {
+    label: LAUNCHD_LABEL,
+    target,
+    running,
+    ...registration.status,
+  };
 }
 
 export async function inspectLaunchAgent({
@@ -154,20 +172,23 @@ export async function inspectLaunchAgent({
   currentProgramArguments = getCurrentProgramArguments(),
   probeServer = () => probeNotificationServer({ port }),
 } = {}) {
-  const installed = existsSync(plistPath);
   const running = runLaunchctl(["print", `${target}/${LAUNCHD_LABEL}`], {
     runCommand,
     allowFailure: true,
   });
-  const programArguments = installed ? readProgramArguments(plistPath) : [];
+  const registration = getLaunchAgentRegistration(plistPath, running);
+  const { plistExists } = registration;
+  const { installed } = registration.status;
+  const programArguments = plistExists ? readProgramArguments(plistPath) : [];
   const serverReachable = running ? await probeServer() : false;
   const issues = [];
 
   if (!installed) {
     issues.push("not_installed");
-  } else if (programArguments.some((arg) => arg.startsWith("/$bunfs/"))) {
+  } else if (plistExists && programArguments.some((arg) => arg.startsWith("/$bunfs/"))) {
     issues.push("invalid_program_arguments");
   } else if (
+    plistExists &&
     programArguments[0] &&
     currentProgramArguments[0] &&
     resolve(programArguments[0]) !== resolve(currentProgramArguments[0])
@@ -183,10 +204,9 @@ export async function inspectLaunchAgent({
 
   return {
     label: LAUNCHD_LABEL,
-    path: plistPath,
     target,
-    installed,
     running,
+    ...registration.status,
     serverReachable,
     programArguments,
     currentProgramArguments,

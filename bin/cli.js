@@ -78,7 +78,7 @@ export function formatLaunchAgentStatus(status) {
   }
 
   const detailLines = [
-    `LaunchAgent: ${status.path ?? "(不明)"}`,
+    `LaunchAgent: ${status.path ?? status.label ?? "(不明)"}`,
     `Program: ${status.programArguments?.[0] ?? "(不明)"}`,
     `通知サーバー: ${status.serverReachable ? "接続できるのだ" : "接続できないのだ"}`,
   ];
@@ -92,7 +92,9 @@ export function formatLaunchAgentStatus(status) {
     lines.push("⚠ LaunchAgent の起動引数が壊れているのだ。もう一度 install してほしいのだ");
   }
   if (status.issues.includes("program_mismatch")) {
-    lines.push("⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。もう一度 install してほしいのだ");
+    lines.push(
+      "⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。自動起動の設定を更新してほしいのだ",
+    );
   }
   if (status.issues.includes("server_unreachable")) {
     lines.push("⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ");

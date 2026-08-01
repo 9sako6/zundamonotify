@@ -26,15 +26,47 @@ https://github.com/user-attachments/assets/698df345-be29-4992-9177-3dfc64c3e142
 
 ## 対応環境なのだ
 
-- macOS
+- macOS（Apple Silicon）
 - Claude Code
 - Codex
 
 ## インストールするのだ
 
+### mise
+
 ```bash
 mise use -g github:9sako6/zundamonotify
 ```
+
+### Nix
+
+インストールせずに実行するのだ。
+
+```bash
+nix run github:9sako6/zundamonotify -- --help
+```
+
+nix-darwin では既存の flake に input を追加するのだ。
+
+```nix
+inputs.zundamonotify = {
+  url = "github:9sako6/zundamonotify";
+};
+```
+
+`darwinSystem` の `modules` に module と設定を追加するのだ。
+
+```nix
+modules = [
+  zundamonotify.darwinModules.default
+  {
+    services.zundamonotify.enable = true;
+  }
+];
+```
+
+module がコマンドのインストールと自動起動を管理するから、`zundamonotify install` と `zundamonotify uninstall` は実行しなくてよいのだ。
+ポートを変える場合は `services.zundamonotify.port` を指定するのだ。
 
 ## 使い方なのだ
 
