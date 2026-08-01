@@ -1,19 +1,7 @@
 {
   "name": "zundamonotify",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "AIエージェントのお仕事完了を「ずんだもん」の音声でお知らせするCLIツールなのだ",
   "type": "module",
-  "bin": {
-    "zundamonotify": "./bin/cli.js"
-  },
-  "scripts": {
-    "build": "node scripts/build-binary.js",
-    "serve": "node bin/cli.js serve",
-    "test": "node --test"
-  },
-  "engines": {
-    "node": ">=22"
-  },
-  "packageManager": "pnpm@10.33.2",
   "license": "MIT"
 }

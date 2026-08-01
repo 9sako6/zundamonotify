@@ -26,25 +26,34 @@ https://github.com/user-attachments/assets/698df345-be29-4992-9177-3dfc64c3e142
 
 ## 対応環境なのだ
 
-- macOS
+- macOS（Apple Silicon）
 - Claude Code
 - Codex
 
-## インストールするのだ
+## nix-darwin でインストールするのだ
 
-```bash
-mise use -g github:9sako6/zundamonotify
+既存の flake に input を追加するのだ。
+
+```nix
+inputs.zundamonotify = {
+  url = "github:9sako6/zundamonotify";
+};
 ```
+
+`darwinSystem` の `modules` に module と設定を追加するのだ。
+
+```nix
+modules = [
+  zundamonotify.darwinModules.default
+  {
+    services.zundamonotify.enable = true;
+  }
+];
+```
+
+module がコマンドのインストールと自動起動をまとめて管理するのだ。
 
 ## 使い方なのだ
-
-自動起動を登録するのだ。
-
-```bash
-zundamonotify install
-```
-
-これでログイン時に自動起動するのだ。
 
 状態を見るのだ。
 
@@ -52,23 +61,11 @@ zundamonotify install
 zundamonotify status
 ```
 
-自動起動を解除するのだ。
+一度だけ実行する場合は `nix run` を使えるのだ。
 
 ```bash
-zundamonotify uninstall
+nix run github:9sako6/zundamonotify -- --help
 ```
-
-## 更新なのだ
-
-新しいバージョンを入れた後は、自動起動も今のバイナリに向け直すのだ。
-
-```bash
-mise install github:9sako6/zundamonotify@vX.Y.Z
-zundamonotify install
-zundamonotify status
-```
-
-`install` は自動起動の登録と更新を兼ねるのだ。
 
 ## ライセンスなのだ
 
