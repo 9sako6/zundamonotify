@@ -26,9 +26,6 @@
 
       darwinModules.default = import ./nix/module.nix { inherit self; };
 
-      packages.${system} = {
-        default = package;
-        zundamonotify = package;
-      };
+      packages.${system}.default = package;
     };
 }

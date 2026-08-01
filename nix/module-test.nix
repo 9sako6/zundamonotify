@@ -24,9 +24,8 @@ let
 in
 pkgs.runCommand "zundamonotify-module-test" { } ''
   test '${service.Label}' = 'com.9sako6.zundamonotify'
+  test '${builtins.toString (builtins.length service.ProgramArguments)}' = '2'
   test '${builtins.elemAt service.ProgramArguments 1}' = 'serve'
-  test '${builtins.elemAt service.ProgramArguments 2}' = '--port'
-  test '${builtins.elemAt service.ProgramArguments 3}' = '12378'
   test '${builtins.toString service.RunAtLoad}' = '1'
   test '${builtins.toString service.KeepAlive}' = '1'
   touch "$out"

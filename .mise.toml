@@ -1,16 +1,15 @@
 [tools]
 bun = "1.3.12"
 node = "24.15.0"
-pnpm = "10.33.2"
 
 [tasks.serve]
-run = "pnpm serve"
+run = "node bin/cli.js serve"
 description = "Run zundamonotify in the foreground"
 
 [tasks.build]
-run = "pnpm build"
-description = "Build the single-file macOS arm64 executable"
+run = "node scripts/build-binary.js"
+description = "Build the zundamonotify executable"
 
 [tasks.test]
-run = "pnpm test"
+run = "node --test"
 description = "Run the test suite"

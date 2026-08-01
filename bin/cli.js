@@ -7,18 +7,12 @@ import { pathToFileURL } from "node:url";
 import { createCodexSessionsMonitor } from "../src/codex-monitor.js";
 import { createClaudeCodeSessionsMonitor } from "../src/claude-code-monitor.js";
 import { startServer } from "../src/server.js";
-import {
-  inspectLaunchAgent,
-  installLaunchAgent,
-  uninstallLaunchAgent,
-} from "../src/launchd.js";
+import { inspectLaunchAgent } from "../src/launchd.js";
 
 const HELP = `
 zundamonotify - ずんだもんの声でAIエージェントの完了をお知らせするのだ！
 
 つかいかたなのだ:
-  zundamonotify install      ログイン時に自動起動するようにするのだ
-  zundamonotify uninstall    自動起動を解除するのだ
   zundamonotify status       自動起動の状態を見るのだ
 
 開発用なのだ:
@@ -73,13 +67,8 @@ export function startSessionMonitors(port, starters = MONITOR_STARTERS) {
 }
 
 export function formatLaunchAgentStatus(status) {
-  if (!status.installed) {
-    return ["zundamonotify は自動起動に登録されていないのだ"];
-  }
-
   const detailLines = [
-    `LaunchAgent: ${status.path ?? status.label ?? "(不明)"}`,
-    `Program: ${status.programArguments?.[0] ?? "(不明)"}`,
+    `LaunchAgent: ${status.label}`,
     `通知サーバー: ${status.serverReachable ? "接続できるのだ" : "接続できないのだ"}`,
   ];
 
@@ -87,20 +76,12 @@ export function formatLaunchAgentStatus(status) {
     return ["zundamonotify は自動起動に登録されていて、動いているのだ", ...detailLines];
   }
 
-  const lines = ["zundamonotify は自動起動に登録されているけど、動いていないのだ", ...detailLines];
-  if (status.issues.includes("invalid_program_arguments")) {
-    lines.push("⚠ LaunchAgent の起動引数が壊れているのだ。もう一度 install してほしいのだ");
-  }
-  if (status.issues.includes("program_mismatch")) {
-    lines.push(
-      "⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。自動起動の設定を更新してほしいのだ",
-    );
-  }
+  const lines = ["zundamonotify は動いていないのだ", ...detailLines];
   if (status.issues.includes("server_unreachable")) {
     lines.push("⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ");
   }
   if (status.issues.includes("not_running")) {
-    lines.push("⚠ launchd には登録されているけど、job が起動していないのだ");
+    lines.push("⚠ launchd の job が起動していないのだ。nix-darwin の設定を確認してほしいのだ");
   }
   return lines;
 }
@@ -117,34 +98,6 @@ export async function main() {
     case "--version":
     case "-v": {
       console.log(VERSION);
-      break;
-    }
-
-    case "install": {
-      const { values } = parseArgs({
-        args: process.argv.slice(3),
-        options: {
-          port: { type: "string", short: "p", default: "12378" },
-        },
-      });
-      const port = Number(values.port);
-      if (!Number.isInteger(port) || port < 0 || port > 65535) {
-        console.error("⚠ ポートは 0〜65535 の整数を指定するのだ！");
-        process.exitCode = 1;
-        break;
-      }
-      const result = installLaunchAgent({ port });
-      console.log(`zundamonotify を自動起動に登録したのだ: ${result.path}`);
-      break;
-    }
-
-    case "uninstall": {
-      const result = uninstallLaunchAgent();
-      if (result.wasInstalled) {
-        console.log("zundamonotify の自動起動を解除したのだ");
-      } else {
-        console.log("zundamonotify は自動起動に登録されていないのだ");
-      }
       break;
     }
 

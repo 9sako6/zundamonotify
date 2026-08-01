@@ -39,10 +39,10 @@ describe("zundamonotify --help", () => {
     const result = await run(["--help"]);
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /zundamonotify/);
-    assert.match(result.stdout, /install/);
-    assert.match(result.stdout, /uninstall/);
     assert.match(result.stdout, /status/);
     assert.match(result.stdout, /serve/);
+    assert.doesNotMatch(result.stdout, /install/);
+    assert.doesNotMatch(result.stdout, /uninstall/);
   });
 
   it("-h でも同じように見せてくれるのだ", async () => {
@@ -162,18 +162,32 @@ describe("formatLaunchAgentStatus", () => {
   it("正常なら動いていると表示するのだ", () => {
     assert.deepEqual(
       formatLaunchAgentStatus({
-        installed: true,
         ok: true,
-        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        programArguments: ["/Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify"],
+        label: "com.9sako6.zundamonotify",
         serverReachable: true,
         issues: [],
       }),
       [
         "zundamonotify は自動起動に登録されていて、動いているのだ",
-        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        "Program: /Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify",
+        "LaunchAgent: com.9sako6.zundamonotify",
         "通知サーバー: 接続できるのだ",
+      ],
+    );
+  });
+
+  it("launchd の job がなければ nix-darwin の確認を促すのだ", () => {
+    assert.deepEqual(
+      formatLaunchAgentStatus({
+        ok: false,
+        label: "com.9sako6.zundamonotify",
+        serverReachable: false,
+        issues: ["not_running"],
+      }),
+      [
+        "zundamonotify は動いていないのだ",
+        "LaunchAgent: com.9sako6.zundamonotify",
+        "通知サーバー: 接続できないのだ",
+        "⚠ launchd の job が起動していないのだ。nix-darwin の設定を確認してほしいのだ",
       ],
     );
   });
@@ -181,79 +195,16 @@ describe("formatLaunchAgentStatus", () => {
   it("通知サーバーに届かなければ具体的に表示するのだ", () => {
     assert.deepEqual(
       formatLaunchAgentStatus({
-        installed: true,
         ok: false,
-        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        programArguments: ["/Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify"],
+        label: "com.9sako6.zundamonotify",
         serverReachable: false,
         issues: ["server_unreachable"],
       }),
       [
-        "zundamonotify は自動起動に登録されているけど、動いていないのだ",
-        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        "Program: /Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify",
+        "zundamonotify は動いていないのだ",
+        "LaunchAgent: com.9sako6.zundamonotify",
         "通知サーバー: 接続できないのだ",
         "⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ",
-      ],
-    );
-  });
-
-  it("LaunchAgent の起動引数が壊れていたら再 install を促すのだ", () => {
-    assert.deepEqual(
-      formatLaunchAgentStatus({
-        installed: true,
-        ok: false,
-        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        programArguments: ["/Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify"],
-        serverReachable: false,
-        issues: ["invalid_program_arguments"],
-      }),
-      [
-        "zundamonotify は自動起動に登録されているけど、動いていないのだ",
-        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        "Program: /Users/me/.local/share/mise/installs/zundamonotify/0.1.5/zundamonotify",
-        "通知サーバー: 接続できないのだ",
-        "⚠ LaunchAgent の起動引数が壊れているのだ。もう一度 install してほしいのだ",
-      ],
-    );
-  });
-
-  it("LaunchAgent が別の binary を見ていたら再 install を促すのだ", () => {
-    assert.deepEqual(
-      formatLaunchAgentStatus({
-        installed: true,
-        ok: false,
-        path: "/Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        programArguments: ["/old/zundamonotify"],
-        serverReachable: true,
-        issues: ["program_mismatch"],
-      }),
-      [
-        "zundamonotify は自動起動に登録されているけど、動いていないのだ",
-        "LaunchAgent: /Users/me/Library/LaunchAgents/com.9sako6.zundamonotify.plist",
-        "Program: /old/zundamonotify",
-        "通知サーバー: 接続できるのだ",
-        "⚠ LaunchAgent が今の zundamonotify と違うバイナリを見ているのだ。自動起動の設定を更新してほしいのだ",
-      ],
-    );
-  });
-
-  it("別の仕組みが登録した LaunchAgent は label を表示するのだ", () => {
-    assert.deepEqual(
-      formatLaunchAgentStatus({
-        installed: true,
-        ok: true,
-        label: "com.9sako6.zundamonotify",
-        path: null,
-        programArguments: [],
-        serverReachable: true,
-        issues: [],
-      }),
-      [
-        "zundamonotify は自動起動に登録されていて、動いているのだ",
-        "LaunchAgent: com.9sako6.zundamonotify",
-        "Program: (不明)",
-        "通知サーバー: 接続できるのだ",
       ],
     );
   });

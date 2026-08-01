@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const outfile = "./dist/zundamonotify-macos-arm64";
+const outfile = "./dist/zundamonotify";
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 process.env.ZUNDAMONOTIFY_VERSION = version;
 

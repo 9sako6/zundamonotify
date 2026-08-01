@@ -13,19 +13,7 @@ stdenvNoCC.mkDerivation {
   pname = packageJson.name;
   inherit (packageJson) version;
 
-  src = lib.cleanSourceWith {
-    src = ../.;
-    filter =
-      path: type:
-      let
-        name = baseNameOf path;
-      in
-      !builtins.elem name [
-        ".git"
-        "dist"
-        "node_modules"
-      ];
-  };
+  src = ../.;
 
   nativeBuildInputs = [
     bun
@@ -46,7 +34,7 @@ stdenvNoCC.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 dist/zundamonotify-macos-arm64 "$out/bin/zundamonotify"
+    install -Dm755 dist/zundamonotify "$out/bin/zundamonotify"
     runHook postInstall
   '';
 
