@@ -54,6 +54,12 @@ describe("HTTP Server なのだ", () => {
     return new Promise((resolve) => server.close(resolve));
   });
 
+  it("GET /health で稼働確認できるのだ", async () => {
+    const res = await request(port, "GET", "/health");
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { ok: true });
+  });
+
   it("POST /notifications/stop したら 200 で { ok: true } が返ってくるのだ", async () => {
     const res = await request(port, "POST", "/notifications/stop");
     assert.equal(res.status, 200);
@@ -87,22 +93,6 @@ describe("HTTP Server なのだ", () => {
     assert.match(args[0], /assets[/\\]stop[/\\].*\.wav$/);
   });
 
-  it("POST /agent-events で approval_review.completed を受けても音声は鳴らさないのだ", async () => {
-    const before = execFileCalls.length;
-    const res = await request(port, "POST", "/agent-events", {
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: "approval_review.completed",
-        source: "codex",
-        sessionId: "codex:guardian-session",
-      }),
-    });
-
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { ok: true });
-    assert.equal(execFileCalls.length, before);
-  });
-
   it("POST /agent-events で alert.requested を受けたら通知音声を鳴らすのだ", async () => {
     const before = execFileCalls.length;
     const res = await request(port, "POST", "/agent-events", {
@@ -131,6 +121,18 @@ describe("HTTP Server なのだ", () => {
     assert.equal(res.status, 400);
     assert.deepEqual(res.body, { error: "Bad Request" });
   });
+
+  for (const type of ["approval_review.completed", "tool_call.completed"]) {
+    it(`POST /agent-events の効果がない type ${type} は 400 なのだ`, async () => {
+      const res = await request(port, "POST", "/agent-events", {
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type }),
+      });
+
+      assert.equal(res.status, 400);
+      assert.deepEqual(res.body, { error: "Bad Request" });
+    });
+  }
 
   it("POST /notifications（イベントなし）は 404 なのだ", async () => {
     const res = await request(port, "POST", "/notifications");

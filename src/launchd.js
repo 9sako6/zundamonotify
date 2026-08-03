@@ -17,11 +17,7 @@ function isLaunchAgentRunning(target, runCommand) {
 
 async function probeNotificationServer({ port = 12378, request = fetch } = {}) {
   try {
-    const res = await request(`http://127.0.0.1:${port}/agent-events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "approval_review.completed", source: "status" }),
-    });
+    const res = await request(`http://127.0.0.1:${port}/health`);
     return res.ok;
   } catch {
     return false;
@@ -31,10 +27,10 @@ async function probeNotificationServer({ port = 12378, request = fetch } = {}) {
 export async function inspectLaunchAgent({
   target = getLaunchdTarget(),
   runCommand = execFileSync,
-  probeServer = probeNotificationServer,
+  request = fetch,
 } = {}) {
   const running = isLaunchAgentRunning(target, runCommand);
-  const serverReachable = running ? await probeServer() : false;
+  const serverReachable = running ? await probeNotificationServer({ request }) : false;
   const issues = !running ? ["not_running"] : serverReachable ? [] : ["server_unreachable"];
 
   return {

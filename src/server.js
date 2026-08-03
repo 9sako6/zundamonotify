@@ -7,12 +7,10 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ASSETS_DIR = resolve(__dirname, "..", "assets");
 export const NOTIFICATION_EVENTS = ["stop", "notification"];
-export const AGENT_EVENT_TYPES = [
-  "agent_turn.completed",
-  "approval_review.completed",
-  "tool_call.completed",
-  "alert.requested",
-];
+const AGENT_EVENT_NOTIFICATIONS = {
+  "agent_turn.completed": "stop",
+  "alert.requested": "notification",
+};
 const EVENT_PATH_PATTERN = new RegExp(`^/notifications/(${NOTIFICATION_EVENTS.join("|")})$`);
 
 /** @internal テストから差し替えできるようにしてるのだ */
@@ -30,12 +28,6 @@ let bundledAssetFiles = null;
 
 function getAssetSubdir(event) {
   return event === "notification" ? "notification" : "stop";
-}
-
-function getNotificationEventForAgentEventType(type) {
-  if (type === "agent_turn.completed") return "stop";
-  if (type === "alert.requested") return "notification";
-  return null;
 }
 
 export function setBundledAssetFiles(filesByEvent) {
@@ -130,7 +122,7 @@ function respondBadRequest(res) {
   res.end(RES_BAD_REQUEST);
 }
 
-function parseAgentEvent(rawBody) {
+function parseAgentEventNotification(rawBody) {
   let event;
   try {
     event = JSON.parse(rawBody);
@@ -138,14 +130,17 @@ function parseAgentEvent(rawBody) {
     return null;
   }
 
-  if (!event || typeof event !== "object" || !AGENT_EVENT_TYPES.includes(event.type)) {
-    return null;
-  }
-  return event;
+  if (!event || typeof event !== "object") return null;
+  return AGENT_EVENT_NOTIFICATIONS[event.type] ?? null;
 }
 
 export function startServer(port, { now = () => Date.now(), notify = createNotifier({ now }) } = {}) {
   const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/health") {
+      respondOk(res);
+      return;
+    }
+
     const match = req.method === "POST" && req.url?.match(EVENT_PATH_PATTERN);
     if (match) {
       const event = match[1];
@@ -158,15 +153,14 @@ export function startServer(port, { now = () => Date.now(), notify = createNotif
 
     if (req.method === "POST" && req.url === "/agent-events") {
       readRequestBody(req, res, (rawBody) => {
-        const event = parseAgentEvent(rawBody);
-        if (!event) {
+        const notificationEvent = parseAgentEventNotification(rawBody);
+        if (!notificationEvent) {
           respondBadRequest(res);
           return;
         }
 
         respondOk(res);
-        const notificationEvent = getNotificationEventForAgentEventType(event.type);
-        if (notificationEvent) notify(notificationEvent);
+        notify(notificationEvent);
       });
       return;
     }
