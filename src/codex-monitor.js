@@ -1,6 +1,6 @@
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createJsonlMonitor } from "./jsonl-monitor.js";
 
 export const CODEX_SESSIONS_PATH = resolve(homedir(), ".codex", "sessions");
@@ -18,21 +18,9 @@ export function getSessionDirs({ sessionDir = CODEX_SESSIONS_PATH, now = new Dat
   });
 }
 
-export function extractSessionId(fileName) {
-  const base = basename(fileName, ".jsonl");
-  const parts = base.split("-");
-  if (parts.length < 10) return null;
-  return parts.slice(-5).join("-");
-}
-
-function createTrackedEntry(fileName) {
-  const sessionId = extractSessionId(fileName);
-  if (!sessionId) return null;
-
+function createTrackedEntry() {
   return {
     offset: 0,
-    sessionId: `codex:${sessionId}`,
-    cwd: "",
     partial: "",
     lastCompletedTurnId: null,
     ignored: false,
@@ -59,7 +47,6 @@ export function createCodexSessionsMonitor({
 
     const { type, payload } = parsed;
     if (type === "session_meta" && payload && typeof payload === "object") {
-      entry.cwd = payload.cwd || "";
       if (payload.source?.subagent?.other === "guardian") {
         entry.ignored = true;
       }
@@ -88,12 +75,7 @@ export function createCodexSessionsMonitor({
 
     entry.lastCompletedTurnId = turnId;
     if (notifyOnTaskComplete) {
-      notifyOnTaskComplete({
-        sessionId: entry.sessionId,
-        cwd: entry.cwd,
-        turnId,
-        lastAgentMessage: payload.last_agent_message || "",
-      });
+      notifyOnTaskComplete();
     }
   }
 

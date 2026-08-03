@@ -1,35 +1,18 @@
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createJsonlMonitor } from "./jsonl-monitor.js";
 
 export const CLAUDE_PROJECTS_PATH = resolve(homedir(), ".claude", "projects");
 export const DEFAULT_CLAUDE_POLL_INTERVAL_MS = 1500;
 export const DEFAULT_CLAUDE_COMPLETION_DELAY_MS = 2000;
 
-function createTrackedEntry(fileName) {
-  const sessionId = basename(fileName, ".jsonl");
-  if (!sessionId) return null;
-
+function createTrackedEntry() {
   return {
     offset: 0,
-    sessionId: `claude-code:${sessionId}`,
     partial: "",
-    cwd: "",
     lastCompletedTurnId: null,
   };
-}
-
-function extractLastAgentMessage(message) {
-  const content = message?.content;
-  if (!Array.isArray(content)) {
-    return "";
-  }
-
-  return content
-    .filter((block) => block?.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
-    .join("\n");
 }
 
 export function createClaudeCodeSessionsMonitor({
@@ -48,10 +31,6 @@ export function createClaudeCodeSessionsMonitor({
       return;
     }
 
-    if (typeof parsed.cwd === "string") {
-      entry.cwd = parsed.cwd;
-    }
-
     if (parsed.type !== "assistant" || parsed.message?.stop_reason !== "end_turn") {
       return;
     }
@@ -63,12 +42,7 @@ export function createClaudeCodeSessionsMonitor({
 
     entry.lastCompletedTurnId = turnId;
     if (notifyOnTaskComplete) {
-      notifyOnTaskComplete({
-        sessionId: entry.sessionId,
-        cwd: entry.cwd,
-        turnId,
-        lastAgentMessage: extractLastAgentMessage(parsed.message),
-      });
+      notifyOnTaskComplete();
     }
   }
 

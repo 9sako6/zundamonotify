@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 describe("createCodexSessionsMonitor", () => {
-  it("起動後に追加された task_complete を検知して sessionId と cwd を渡すのだ", () => {
+  it("起動後に追加された task_complete を通知するのだ", () => {
     const nowMs = Date.parse("2026-04-24T10:00:00.000Z");
     const filePath = makeSessionFile();
     const events = [];
@@ -43,8 +43,8 @@ describe("createCodexSessionsMonitor", () => {
       completionDelayMs: 0,
       now: () => nowMs,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -67,14 +67,7 @@ describe("createCodexSessionsMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(events, [
-      {
-        sessionId: "codex:019dbef3-c4e5-70e1-9ac8-983162b6616b",
-        cwd: "/work/zundamonotify",
-        turnId: "turn-1",
-        lastAgentMessage: "done",
-      },
-    ]);
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("同じ turn_id は重複通知しないのだ", () => {
@@ -89,8 +82,8 @@ describe("createCodexSessionsMonitor", () => {
       completionDelayMs: 0,
       now: () => nowMs,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -115,7 +108,6 @@ describe("createCodexSessionsMonitor", () => {
     monitor.poll();
 
     assert.equal(events.length, 1);
-    assert.equal(events[0].turnId, "turn-1");
   });
 
   it("古いファイルの履歴は初回ポーリングで再生しないのだ", () => {
@@ -141,8 +133,8 @@ describe("createCodexSessionsMonitor", () => {
       completionDelayMs: 0,
       now: () => nowMs,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -178,8 +170,8 @@ describe("createCodexSessionsMonitor", () => {
       completionDelayMs: 0,
       now: () => nowMs,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -200,8 +192,7 @@ describe("createCodexSessionsMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(events.map((event) => event.turnId), ["turn-2"]);
-    assert.equal(events[0].cwd, "/work/zundamonotify");
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("task_complete の通知は少し遅らせるのだ", () => {
@@ -220,8 +211,8 @@ describe("createCodexSessionsMonitor", () => {
         scheduled.push({ fn, delay });
         return { fn, delay };
       },
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -245,8 +236,7 @@ describe("createCodexSessionsMonitor", () => {
 
     scheduled[0].fn();
 
-    assert.equal(events.length, 1);
-    assert.equal(events[0].turnId, "turn-1");
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("アイドル後に同じ session file を先頭から再生しないのだ", () => {
@@ -271,8 +261,8 @@ describe("createCodexSessionsMonitor", () => {
       completionDelayMs: 0,
       now: () => nowMs,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -294,7 +284,7 @@ describe("createCodexSessionsMonitor", () => {
 
     monitor.poll();
 
-    assert.deepEqual(events.map((event) => event.turnId), ["turn-2"]);
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("guardian session の approval review 完了は通知しないのだ", () => {
@@ -309,8 +299,8 @@ describe("createCodexSessionsMonitor", () => {
       completionDelayMs: 0,
       now: () => nowMs,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -355,8 +345,8 @@ describe("createCodexSessionsMonitor", () => {
       completionDelayMs: 0,
       now: () => nowMs,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 

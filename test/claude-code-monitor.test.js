@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe("createClaudeCodeSessionsMonitor", () => {
-  it("起動後に追加された end_turn を検知して sessionId と cwd を渡すのだ", () => {
+  it("起動後に追加された end_turn を通知するのだ", () => {
     const filePath = makeSessionFile({ sessionId: "abc-123" });
     const events = [];
 
@@ -37,8 +37,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
       projectsDir: tmpRoot,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -61,14 +61,7 @@ describe("createClaudeCodeSessionsMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(events, [
-      {
-        sessionId: "claude-code:abc-123",
-        cwd: "/work/zundamonotify",
-        turnId: "message-1",
-        lastAgentMessage: "done",
-      },
-    ]);
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("tool_use は通知しないのだ", () => {
@@ -81,8 +74,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
       projectsDir: tmpRoot,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -117,8 +110,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
       projectsDir: tmpRoot,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -144,7 +137,6 @@ describe("createClaudeCodeSessionsMonitor", () => {
     monitor.poll();
 
     assert.equal(events.length, 1);
-    assert.equal(events[0].turnId, "message-1");
   });
 
   it("起動直後の既存ファイルは再生しないのだ", () => {
@@ -168,8 +160,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
       projectsDir: tmpRoot,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -199,8 +191,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
       projectsDir: tmpRoot,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -219,7 +211,7 @@ describe("createClaudeCodeSessionsMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(events.map((event) => event.turnId), ["message-2"]);
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("subagents 配下のファイルは無視するのだ", () => {
@@ -247,8 +239,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
       projectsDir: tmpRoot,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -267,7 +259,7 @@ describe("createClaudeCodeSessionsMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(events.map((event) => event.turnId), ["message-1"]);
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("通知を completionDelayMs だけ遅らせるのだ", () => {
@@ -284,8 +276,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
         scheduled.push({ fn, delay });
         return { fn, delay };
       },
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -310,45 +302,7 @@ describe("createClaudeCodeSessionsMonitor", () => {
 
     scheduled[0].fn();
 
-    assert.equal(events.length, 1);
-    assert.equal(events[0].turnId, "message-1");
-  });
-
-  it("text ブロックがなければ lastAgentMessage は空文字なのだ", () => {
-    const filePath = makeSessionFile();
-    const events = [];
-
-    writeFileSync(filePath, "");
-
-    const monitor = createClaudeCodeSessionsMonitor({
-      projectsDir: tmpRoot,
-      completionDelayMs: 0,
-      schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
-      },
-    });
-
-    monitor.poll();
-    appendFileSync(
-      filePath,
-      [
-        JSON.stringify({
-          type: "assistant",
-          cwd: "/work/zundamonotify",
-          uuid: "message-1",
-          message: {
-            stop_reason: "end_turn",
-            content: [{ type: "tool_use", name: "bash" }],
-          },
-        }),
-        "",
-      ].join("\n"),
-    );
-    monitor.poll();
-
-    assert.equal(events.length, 1);
-    assert.equal(events[0].lastAgentMessage, "");
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("複数プロジェクトを同時に監視するのだ", () => {
@@ -365,8 +319,8 @@ describe("createClaudeCodeSessionsMonitor", () => {
       projectsDir: root,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -391,9 +345,6 @@ describe("createClaudeCodeSessionsMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(
-      events.map((event) => event.sessionId).sort(),
-      ["claude-code:session-a", "claude-code:session-b"],
-    );
+    assert.deepEqual(events, ["completed", "completed"]);
   });
 });

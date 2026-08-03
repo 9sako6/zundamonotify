@@ -7,6 +7,7 @@ const dataHome = process.env.XDG_DATA_HOME || resolve(homedir(), ".local", "shar
 export const OPENCODE_LOG_PATH = resolve(dataHome, "opencode", "log", "opencode.log");
 export const DEFAULT_OPENCODE_POLL_INTERVAL_MS = 1500;
 export const DEFAULT_OPENCODE_COMPLETION_DELAY_MS = 2000;
+const MAX_IGNORED_SESSIONS = 1024;
 
 function readField(line, name) {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -25,10 +26,16 @@ function createTrackedEntry() {
   return {
     offset: 0,
     partial: "",
-    runs: new Map(),
-    sessions: new Map(),
-    completedTurns: new Set(),
+    ignoredSessions: new Set(),
   };
+}
+
+function ignoreSession(entry, sessionId) {
+  if (entry.ignoredSessions.has(sessionId)) return;
+  if (entry.ignoredSessions.size >= MAX_IGNORED_SESSIONS) {
+    entry.ignoredSessions.delete(entry.ignoredSessions.values().next().value);
+  }
+  entry.ignoredSessions.add(sessionId);
 }
 
 export function createOpenCodeLogMonitor({
@@ -40,47 +47,28 @@ export function createOpenCodeLogMonitor({
   cancel = clearTimeout,
 } = {}) {
   function processLine(line, entry, notifyOnTaskComplete) {
-    const runId = readField(line, "run");
     const message = readField(line, "message");
-
-    if (runId && message === "creating instance") {
-      entry.runs.set(runId, readField(line, "directory") || "");
-      return;
-    }
 
     if (message === "created") {
       const sessionId = readField(line, "id");
       if (!sessionId) return;
 
       const parentId = readField(line, "parentID");
-      const cwd = readField(line, "directory") || (runId && entry.runs.get(runId)) || "";
-      entry.sessions.set(sessionId, {
-        cwd,
-        ignored: parentId !== null && parentId !== "undefined",
-      });
+      if (parentId !== null && parentId !== "undefined") {
+        ignoreSession(entry, sessionId);
+      } else {
+        entry.ignoredSessions.delete(sessionId);
+      }
       return;
     }
 
     if (message !== "exiting loop") return;
 
     const rawSessionId = readField(line, "session.id");
-    const turnId = readField(line, "timestamp");
-    if (!rawSessionId || !turnId) return;
-
-    const session = entry.sessions.get(rawSessionId);
-    if (session?.ignored) return;
-
-    const completionKey = `${rawSessionId}:${turnId}`;
-    if (entry.completedTurns.has(completionKey)) return;
-    entry.completedTurns.add(completionKey);
+    if (!rawSessionId || entry.ignoredSessions.has(rawSessionId)) return;
 
     if (notifyOnTaskComplete) {
-      notifyOnTaskComplete({
-        sessionId: `opencode:${rawSessionId}`,
-        cwd: session?.cwd || (runId && entry.runs.get(runId)) || "",
-        turnId,
-        lastAgentMessage: "",
-      });
+      notifyOnTaskComplete();
     }
   }
 

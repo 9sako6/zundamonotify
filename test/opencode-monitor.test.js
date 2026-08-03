@@ -37,8 +37,8 @@ describe("createOpenCodeLogMonitor", () => {
       logPath: filePath,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -51,14 +51,7 @@ describe("createOpenCodeLogMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(events, [
-      {
-        sessionId: "opencode:ses_1",
-        cwd: "/work/my project",
-        turnId: "2026-08-03T10:00:02.000Z",
-        lastAgentMessage: "",
-      },
-    ]);
+    assert.deepEqual(events, ["completed"]);
   });
 
   it("起動直後の既存完了は通知しないのだ", () => {
@@ -73,8 +66,8 @@ describe("createOpenCodeLogMonitor", () => {
       logPath: filePath,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -90,8 +83,8 @@ describe("createOpenCodeLogMonitor", () => {
       logPath: filePath,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -114,8 +107,8 @@ describe("createOpenCodeLogMonitor", () => {
       logPath: filePath,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -137,8 +130,8 @@ describe("createOpenCodeLogMonitor", () => {
       logPath: filePath,
       completionDelayMs: 0,
       schedule: runImmediately,
-      onTaskComplete(event) {
-        events.push(event);
+      onTaskComplete() {
+        events.push("completed");
       },
     });
 
@@ -151,9 +144,28 @@ describe("createOpenCodeLogMonitor", () => {
     );
     monitor.poll();
 
-    assert.deepEqual(events.map((event) => event.turnId), [
-      "2026-08-03T10:00:01.000Z",
-      "2026-08-03T10:01:01.000Z",
-    ]);
+    assert.deepEqual(events, ["completed", "completed"]);
+  });
+
+  it("保持する subagent session は上限を超えないのだ", () => {
+    const filePath = makeLogFile();
+    const monitor = createOpenCodeLogMonitor({
+      logPath: filePath,
+      completionDelayMs: 0,
+      schedule: runImmediately,
+    });
+
+    monitor.poll();
+    appendFileSync(
+      filePath,
+      Array.from(
+        { length: 1100 },
+        (_, index) => line(`message=created id=ses_child_${index} parentID=ses_parent`),
+      ).join(""),
+    );
+    monitor.poll();
+
+    const entry = [...monitor.tracked.values()][0];
+    assert.ok(entry.ignoredSessions.size <= 1024);
   });
 });
