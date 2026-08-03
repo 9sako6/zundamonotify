@@ -1,6 +1,6 @@
 {
   "name": "zundamonotify",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AIエージェントのお仕事完了を「ずんだもん」の音声でお知らせするCLIツールなのだ",
   "type": "module",
   "license": "MIT"
