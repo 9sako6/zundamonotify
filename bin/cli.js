@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createCodexSessionsMonitor } from "../src/codex-monitor.js";
 import { createClaudeCodeSessionsMonitor } from "../src/claude-code-monitor.js";
+import { createOpenCodeLogMonitor } from "../src/opencode-monitor.js";
 import { startServer } from "../src/server.js";
 import { inspectLaunchAgent } from "../src/launchd.js";
 
@@ -60,7 +61,11 @@ function startClaudeCodeMonitor(port) {
   return startMonitor(createClaudeCodeSessionsMonitor, port, "claude-code");
 }
 
-export const MONITOR_STARTERS = [startCodexMonitor, startClaudeCodeMonitor];
+function startOpenCodeMonitor(port) {
+  return startMonitor(createOpenCodeLogMonitor, port, "opencode");
+}
+
+export const MONITOR_STARTERS = [startCodexMonitor, startClaudeCodeMonitor, startOpenCodeMonitor];
 
 export function startSessionMonitors(port, starters = MONITOR_STARTERS) {
   return starters.map((start) => start(port));

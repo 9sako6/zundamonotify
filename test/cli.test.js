@@ -148,13 +148,18 @@ describe("startSessionMonitors", () => {
         calls.push(["claude", port]);
         return { stop() {} };
       },
+      (port) => {
+        calls.push(["opencode", port]);
+        return { stop() {} };
+      },
     ]);
 
     assert.deepEqual(calls, [
       ["codex", 12378],
       ["claude", 12378],
+      ["opencode", 12378],
     ]);
-    assert.equal(handles.length, 2);
+    assert.equal(handles.length, 3);
   });
 });
 

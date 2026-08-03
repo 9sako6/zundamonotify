@@ -1,10 +1,10 @@
 # zundamonotify
 
-Codex と Claude Code の完了を、ずんだもんの音声で知らせる Mac 用ツールなのだ。
+Codex、Claude Code、opencode の完了を、ずんだもんの音声で知らせる Mac 用ツールなのだ。
 
 ## できることなのだ
 
-- Codex と Claude Code のローカルログをポーリングするのだ
+- Codex、Claude Code、opencode のローカルログをポーリングするのだ
 - 作業完了を検知したら、ずんだもんの音声で知らせるのだ
 - ログイン時に自動起動できるのだ
 
@@ -29,6 +29,7 @@ https://github.com/user-attachments/assets/698df345-be29-4992-9177-3dfc64c3e142
 - macOS（Apple Silicon）
 - Claude Code
 - Codex
+- opencode
 
 ## nix-darwin でインストールするのだ
 
