@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stopSound from "../assets/stop/みてほしいのだ.wav" with { type: "file" };
 import notificationSound from "../assets/notification/たすけてほしいのだ.wav" with { type: "file" };
-import { setBundledAssetFiles } from "./server.js";
 
 function materializeEmbeddedFile(sourcePath, dir, fileName) {
   const targetPath = join(dir, fileName);
@@ -18,7 +17,6 @@ export function installBundledAssetFiles() {
     notification: [materializeEmbeddedFile(notificationSound, dir, "notification.wav")],
   };
 
-  setBundledAssetFiles(files);
   process.once("exit", () => {
     rmSync(dir, { recursive: true, force: true });
   });

@@ -4,7 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatLaunchAgentStatus, startSessionMonitors } from "../bin/cli.js";
+import { formatLaunchAgentStatus, startSessionMonitors } from "../src/cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, "..", "bin", "cli.js");
