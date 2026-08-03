@@ -1,11 +1,10 @@
-import { describe, it, afterEach } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentEventNotifier, formatLaunchAgentStatus, startSessionMonitors } from "../bin/cli.js";
+import { formatLaunchAgentStatus, startSessionMonitors } from "../bin/cli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, "..", "bin", "cli.js");
@@ -139,25 +138,26 @@ describe("zundamonotify serve (子プロセスモード)", () => {
 describe("startSessionMonitors", () => {
   it("登録された monitor starter を全部起動するのだ", () => {
     const calls = [];
-    const handles = startSessionMonitors(12378, [
-      (port) => {
-        calls.push(["codex", port]);
+    const onTaskComplete = () => {};
+    const handles = startSessionMonitors(onTaskComplete, [
+      (callback) => {
+        calls.push(["codex", callback]);
         return { stop() {} };
       },
-      (port) => {
-        calls.push(["claude", port]);
+      (callback) => {
+        calls.push(["claude", callback]);
         return { stop() {} };
       },
-      (port) => {
-        calls.push(["opencode", port]);
+      (callback) => {
+        calls.push(["opencode", callback]);
         return { stop() {} };
       },
     ]);
 
     assert.deepEqual(calls, [
-      ["codex", 12378],
-      ["claude", 12378],
-      ["opencode", 12378],
+      ["codex", onTaskComplete],
+      ["claude", onTaskComplete],
+      ["opencode", onTaskComplete],
     ]);
     assert.equal(handles.length, 3);
   });
@@ -212,54 +212,5 @@ describe("formatLaunchAgentStatus", () => {
         "⚠ 通知サーバーに接続できないのだ。起動直後か、再起動ループしている可能性があるのだ",
       ],
     );
-  });
-});
-
-describe("createAgentEventNotifier", () => {
-  it("agent_turn.completed を /agent-events に POST するのだ", async () => {
-    const requests = [];
-    const server = createServer((req, res) => {
-      let rawBody = "";
-      req.setEncoding("utf-8");
-      req.on("data", (chunk) => {
-        rawBody += chunk;
-      });
-      req.on("end", () => {
-        requests.push({
-          method: req.method,
-          url: req.url,
-          body: JSON.parse(rawBody),
-        });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
-      });
-    });
-
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const port = server.address().port;
-
-    try {
-      const notify = createAgentEventNotifier(port, "claude-code");
-      await notify({
-        sessionId: "claude-code:session-1",
-        cwd: "/tmp/project",
-        turnId: "turn-1",
-        lastAgentMessage: "done",
-      });
-    } finally {
-      await new Promise((resolve) => server.close(resolve));
-    }
-
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].method, "POST");
-    assert.equal(requests[0].url, "/agent-events");
-    assert.deepEqual(requests[0].body, {
-      type: "agent_turn.completed",
-      source: "claude-code",
-      sessionId: "claude-code:session-1",
-      cwd: "/tmp/project",
-      turnId: "turn-1",
-      message: "done",
-    });
   });
 });

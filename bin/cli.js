@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createCodexSessionsMonitor } from "../src/codex-monitor.js";
 import { createClaudeCodeSessionsMonitor } from "../src/claude-code-monitor.js";
 import { createOpenCodeLogMonitor } from "../src/opencode-monitor.js";
-import { startServer } from "../src/server.js";
+import { createNotifier, startServer } from "../src/server.js";
 import { inspectLaunchAgent } from "../src/launchd.js";
 
 const HELP = `
@@ -27,48 +27,29 @@ function readPackageVersion() {
 
 const VERSION = process.env.ZUNDAMONOTIFY_VERSION || readPackageVersion();
 
-export function createAgentEventNotifier(port, source) {
-  return async function notifyAgentEvent(event = {}) {
-    try {
-      await fetch(`http://127.0.0.1:${port}/agent-events`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "agent_turn.completed",
-          source,
-          sessionId: event.sessionId,
-          cwd: event.cwd,
-          turnId: event.turnId,
-          message: event.lastAgentMessage,
-        }),
-      });
-    } catch {}
-  };
-}
-
-function startMonitor(factory, port, source) {
+function startMonitor(factory, onTaskComplete) {
   const monitor = factory({
-    onTaskComplete: createAgentEventNotifier(port, source),
+    onTaskComplete,
   });
   return monitor.start();
 }
 
-function startCodexMonitor(port) {
-  return startMonitor(createCodexSessionsMonitor, port, "codex");
+function startCodexMonitor(onTaskComplete) {
+  return startMonitor(createCodexSessionsMonitor, onTaskComplete);
 }
 
-function startClaudeCodeMonitor(port) {
-  return startMonitor(createClaudeCodeSessionsMonitor, port, "claude-code");
+function startClaudeCodeMonitor(onTaskComplete) {
+  return startMonitor(createClaudeCodeSessionsMonitor, onTaskComplete);
 }
 
-function startOpenCodeMonitor(port) {
-  return startMonitor(createOpenCodeLogMonitor, port, "opencode");
+function startOpenCodeMonitor(onTaskComplete) {
+  return startMonitor(createOpenCodeLogMonitor, onTaskComplete);
 }
 
 export const MONITOR_STARTERS = [startCodexMonitor, startClaudeCodeMonitor, startOpenCodeMonitor];
 
-export function startSessionMonitors(port, starters = MONITOR_STARTERS) {
-  return starters.map((start) => start(port));
+export function startSessionMonitors(onTaskComplete, starters = MONITOR_STARTERS) {
+  return starters.map((start) => start(onTaskComplete));
 }
 
 export function formatLaunchAgentStatus(status) {
@@ -127,11 +108,10 @@ export async function main() {
         process.exitCode = 1;
         break;
       }
-      const server = startServer(port);
+      const notify = createNotifier();
+      const server = startServer(port, { notify });
       server.on("listening", () => {
-        const address = server.address();
-        const activePort = typeof address === "object" && address ? address.port : port;
-        startSessionMonitors(activePort);
+        startSessionMonitors(() => notify("stop"));
       });
       break;
     }

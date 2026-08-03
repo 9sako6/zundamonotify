@@ -87,14 +87,19 @@ export function playSoundForEvent(event) {
   playSound(pickRandom(files));
 }
 
-function shouldPlayEvent(event, nowMs, recentEventAt) {
-  if (event !== "stop") return true;
-  const lastPlayedAt = recentEventAt.get(event);
-  if (lastPlayedAt !== undefined && nowMs - lastPlayedAt < STOP_NOTIFICATION_DEDUP_MS) {
-    return false;
-  }
-  recentEventAt.set(event, nowMs);
-  return true;
+export function createNotifier({ now = () => Date.now(), play = playSoundForEvent } = {}) {
+  let lastStopAt;
+
+  return function notify(event) {
+    const nowMs = now();
+    if (event === "stop" && lastStopAt !== undefined && nowMs - lastStopAt < STOP_NOTIFICATION_DEDUP_MS) {
+      return;
+    }
+    if (event === "stop") {
+      lastStopAt = nowMs;
+    }
+    play(event);
+  };
 }
 
 function readRequestBody(req, res, onBody) {
@@ -139,17 +144,14 @@ function parseAgentEvent(rawBody) {
   return event;
 }
 
-export function startServer(port, { now = () => Date.now() } = {}) {
-  const recentEventAt = new Map();
+export function startServer(port, { now = () => Date.now(), notify = createNotifier({ now }) } = {}) {
   const server = createServer((req, res) => {
     const match = req.method === "POST" && req.url?.match(EVENT_PATH_PATTERN);
     if (match) {
       const event = match[1];
       readRequestBody(req, res, () => {
         respondOk(res);
-        if (shouldPlayEvent(event, now(), recentEventAt)) {
-          playSoundForEvent(event);
-        }
+        notify(event);
       });
       return;
     }
@@ -164,9 +166,7 @@ export function startServer(port, { now = () => Date.now() } = {}) {
 
         respondOk(res);
         const notificationEvent = getNotificationEventForAgentEventType(event.type);
-        if (notificationEvent && shouldPlayEvent(notificationEvent, now(), recentEventAt)) {
-          playSoundForEvent(notificationEvent);
-        }
+        if (notificationEvent) notify(notificationEvent);
       });
       return;
     }
