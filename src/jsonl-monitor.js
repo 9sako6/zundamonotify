@@ -26,6 +26,14 @@ export function createJsonlMonitor({
   const pendingTimers = new Set();
   let hasPrimed = false;
 
+  function createEntry(filePath, stat) {
+    const entry = createTrackedEntry(filePath);
+    if (!entry) return null;
+    entry.fileIdentity = `${stat.dev}:${stat.ino}`;
+    tracked.set(filePath, entry);
+    return entry;
+  }
+
   function emitTaskComplete(event) {
     let timer;
     let fired = false;
@@ -44,9 +52,15 @@ export function createJsonlMonitor({
   function pollFile(filePath, stat, notifyOnTaskComplete) {
     let entry = tracked.get(filePath);
     if (!entry) {
-      entry = createTrackedEntry(filePath);
+      entry = createEntry(filePath, stat);
       if (!entry) return;
-      tracked.set(filePath, entry);
+    } else if (entry.fileIdentity !== `${stat.dev}:${stat.ino}` || stat.size < entry.offset) {
+      entry = createEntry(filePath, stat);
+      if (!entry) {
+        tracked.delete(filePath);
+        return;
+      }
+      notifyOnTaskComplete = false;
     }
 
     if (stat.size <= entry.offset) return;
