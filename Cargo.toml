@@ -1,6 +1,6 @@
 [package]
 name = "zundamonotify"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "AIエージェントのお仕事完了を「ずんだもん」の音声でお知らせするCLIツールなのだ"
 license = "MIT"

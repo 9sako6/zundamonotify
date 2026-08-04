@@ -119,7 +119,7 @@ impl Notifier {
             Ok(child) => child,
             Err(error) => {
                 self.state.lock().expect("playback state lock").finish();
-                eprintln!("⚠ 再生に失敗したのだ！ずんだもんの声が出せないのだ！: {error}");
+                eprintln!("音声を再生できなかったのだ：{error}");
                 return;
             }
         };
@@ -129,11 +129,9 @@ impl Notifier {
             state.lock().expect("playback state lock").finish();
             match result {
                 Ok(status) if status.success() => {}
-                Ok(status) => eprintln!(
-                    "⚠ 再生に失敗したのだ！ずんだもんの声が出せないのだ！: afplay exited with {status}"
-                ),
+                Ok(status) => eprintln!("音声を再生できなかったのだ（afplay：{status}）"),
                 Err(error) => {
-                    eprintln!("⚠ 再生に失敗したのだ！ずんだもんの声が出せないのだ！: {error}")
+                    eprintln!("音声を再生できなかったのだ：{error}")
                 }
             }
         });

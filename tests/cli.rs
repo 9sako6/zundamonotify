@@ -16,6 +16,8 @@ fn help_and_no_arguments_succeed() {
         assert!(stdout.contains("zundamonotify"));
         assert!(stdout.contains("status"));
         assert!(stdout.contains("serve"));
+        assert!(stdout.contains("--help"));
+        assert!(stdout.contains("--version"));
         assert!(!stdout.contains("install"));
         assert!(!stdout.contains("uninstall"));
     }
@@ -40,20 +42,20 @@ fn unknown_commands_print_help_and_fail() {
     assert!(
         String::from_utf8(output.stdout)
             .unwrap()
-            .contains("つかいかたなのだ")
+            .contains("使い方:")
     );
     assert!(output.stderr.is_empty());
 }
 
 #[test]
-fn invalid_ports_fail_with_the_existing_message() {
+fn invalid_ports_explain_the_valid_range() {
     for port in ["abc", "99999", "3.14"] {
         let output = run(&["serve", "--port", port]);
         assert!(!output.status.success());
         assert!(
             String::from_utf8(output.stderr)
                 .unwrap()
-                .contains("ポートは 0〜65535 の整数を指定するのだ")
+                .contains("ポートには 0〜65535 の整数を指定してほしいのだ")
         );
     }
 }

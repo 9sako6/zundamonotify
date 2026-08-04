@@ -6,13 +6,15 @@ use zundamonotify::monitor::start_default_monitors;
 use zundamonotify::notifier::{AssetFiles, Notifier};
 use zundamonotify::server::{NotificationHandler, Server};
 
-const HELP: &str = "zundamonotify - ずんだもんの声でAIエージェントの完了をお知らせするのだ！
+const HELP: &str = "zundamonotify - AIエージェントの作業が終わったら、ずんだもんの声で知らせるのだ
 
-つかいかたなのだ:
-  zundamonotify status       自動起動の状態を見るのだ
+使い方:
+  zundamonotify status                 稼働状態を確認する
+  zundamonotify --help                 ヘルプを表示する
+  zundamonotify --version              バージョンを表示する
 
-開発用なのだ:
-  zundamonotify serve --port <number>  通知サーバーを前景で起動するのだ";
+開発用:
+  zundamonotify serve [--port <PORT>]  通知サーバーをフォアグラウンドで起動する";
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -54,37 +56,37 @@ fn parse_port(args: &[String]) -> Result<u16, String> {
     let value = match args {
         [] => "12378",
         [flag, value] if flag == "--port" || flag == "-p" => value,
-        _ => return Err("⚠ ポートは 0〜65535 の整数を指定するのだ！".to_owned()),
+        _ => return Err("ポートには 0〜65535 の整数を指定してほしいのだ".to_owned()),
     };
     value
         .parse::<u16>()
-        .map_err(|_| "⚠ ポートは 0〜65535 の整数を指定するのだ！".to_owned())
+        .map_err(|_| "ポートには 0〜65535 の整数を指定してほしいのだ".to_owned())
 }
 
 fn serve(port: u16) -> Result<(), String> {
-    let assets =
-        AssetFiles::install().map_err(|error| format!("⚠ 音声の準備に失敗したのだ！: {error}"))?;
+    let assets = AssetFiles::install()
+        .map_err(|error| format!("音声ファイルを用意できなかったのだ：{error}"))?;
     let notifier = Notifier::new(assets);
     let notification_handler: NotificationHandler = {
         let notifier = notifier.clone();
         Arc::new(move |event| notifier.notify(event))
     };
     let server = Server::bind(port, notification_handler).map_err(|error| match error.kind() {
-        std::io::ErrorKind::AddrInUse => format!("⚠ ポート {port} はもう使われてるのだ！"),
-        _ => format!("⚠ サーバーエラーなのだ！: {error}"),
+        std::io::ErrorKind::AddrInUse => format!("ポート {port} は使用中なのだ"),
+        _ => format!("通知サーバーを起動できなかったのだ：{error}"),
     })?;
     let active_port = server
         .port()
-        .map_err(|error| format!("⚠ サーバーエラーなのだ！: {error}"))?;
-    println!("ずんだもん通知サーバーが起動したのだ！ http://localhost:{active_port}");
-    println!("POST /agent-events  → AIエージェントのイベントを受け取るのだ！");
+        .map_err(|error| format!("通知サーバーのポートを確認できなかったのだ：{error}"))?;
+    println!("通知サーバーを起動したのだ：http://127.0.0.1:{active_port}");
+    println!("イベント受信先：POST /agent-events");
 
     let completion_handler =
         Arc::new(move || notifier.notify(zundamonotify::NotificationEvent::Stop));
     start_default_monitors(completion_handler);
     server
         .run()
-        .map_err(|error| format!("⚠ サーバーエラーなのだ！: {error}"))
+        .map_err(|error| format!("通知サーバーが停止したのだ：{error}"))
 }
 
 #[cfg(test)]
