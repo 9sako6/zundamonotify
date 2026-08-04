@@ -1,0 +1,283 @@
+use crate::NotificationEvent;
+use serde_json::Value;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+const RES_OK: &str = "{\"ok\":true}";
+const RES_NOT_FOUND: &str = "{\"error\":\"Not Found\"}";
+const RES_BAD_REQUEST: &str = "{\"error\":\"Bad Request\"}";
+const RES_PAYLOAD_TOO_LARGE: &str = "{\"error\":\"Payload Too Large\"}";
+const MAX_BODY_BYTES: usize = 1024;
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+
+pub type NotificationHandler = Arc<dyn Fn(NotificationEvent) + Send + Sync>;
+
+pub struct Server {
+    listener: TcpListener,
+    notify: NotificationHandler,
+}
+
+impl Server {
+    pub fn bind(port: u16, notify: NotificationHandler) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port))?;
+        Ok(Self { listener, notify })
+    }
+
+    pub fn port(&self) -> std::io::Result<u16> {
+        Ok(self.listener.local_addr()?.port())
+    }
+
+    pub fn run(self) -> std::io::Result<()> {
+        for stream in self.listener.incoming() {
+            let stream = stream?;
+            let notify = Arc::clone(&self.notify);
+            thread::spawn(move || {
+                let _ = handle_connection(stream, &notify);
+            });
+        }
+        Ok(())
+    }
+}
+
+struct Response {
+    status: u16,
+    reason: &'static str,
+    body: &'static str,
+    notification: Option<NotificationEvent>,
+}
+
+fn route(method: &str, path: &str, body: &[u8]) -> Response {
+    if method == "GET" && path == "/health" {
+        return response(200, "OK", RES_OK, None);
+    }
+
+    if method == "POST" {
+        let event = match path {
+            "/notifications/stop" => Some(NotificationEvent::Stop),
+            "/notifications/notification" => Some(NotificationEvent::Notification),
+            _ => None,
+        };
+        if event.is_some() {
+            return response(200, "OK", RES_OK, event);
+        }
+
+        if path == "/agent-events" {
+            let event = serde_json::from_slice::<Value>(body)
+                .ok()
+                .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+                .and_then(|event_type| match event_type.as_str() {
+                    "agent_turn.completed" => Some(NotificationEvent::Stop),
+                    "alert.requested" => Some(NotificationEvent::Notification),
+                    _ => None,
+                });
+            return match event {
+                Some(event) => response(200, "OK", RES_OK, Some(event)),
+                None => response(400, "Bad Request", RES_BAD_REQUEST, None),
+            };
+        }
+    }
+
+    response(404, "Not Found", RES_NOT_FOUND, None)
+}
+
+fn response(
+    status: u16,
+    reason: &'static str,
+    body: &'static str,
+    notification: Option<NotificationEvent>,
+) -> Response {
+    Response {
+        status,
+        reason,
+        body,
+        notification,
+    }
+}
+
+fn handle_connection(mut stream: TcpStream, notify: &NotificationHandler) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut request = Vec::new();
+    let header_end = loop {
+        if request.len() > MAX_HEADER_BYTES {
+            return write_response(
+                &mut stream,
+                response(400, "Bad Request", RES_BAD_REQUEST, None),
+            );
+        }
+        let mut buffer = [0_u8; 2048];
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let mut lines = headers.split("\r\n");
+    let Some(request_line) = lines.next() else {
+        return write_response(
+            &mut stream,
+            response(400, "Bad Request", RES_BAD_REQUEST, None),
+        );
+    };
+    let mut parts = request_line.split_whitespace();
+    let (Some(method), Some(path), Some(_version)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return write_response(
+            &mut stream,
+            response(400, "Bad Request", RES_BAD_REQUEST, None),
+        );
+    };
+    let method = method.to_owned();
+    let path = path.to_owned();
+    let content_length = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_length > MAX_BODY_BYTES {
+        return write_response(
+            &mut stream,
+            response(413, "Payload Too Large", RES_PAYLOAD_TOO_LARGE, None),
+        );
+    }
+
+    while request.len() < header_end + content_length {
+        let mut buffer = [0_u8; 1024];
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+    }
+    let available = request.len().saturating_sub(header_end).min(content_length);
+    let result = route(&method, &path, &request[header_end..header_end + available]);
+    let notification = result.notification;
+    write_response(&mut stream, result)?;
+    if let Some(event) = notification {
+        notify(event);
+    }
+    Ok(())
+}
+
+fn write_response(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response.status,
+        response.reason,
+        response.body.len(),
+        response.body
+    )?;
+    stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::Mutex;
+
+    fn round_trip(request: &[u8]) -> (String, Vec<NotificationEvent>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let target = Arc::clone(&notifications);
+        let handler: NotificationHandler = Arc::new(move |event| {
+            target.lock().unwrap().push(event);
+        });
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, &handler).unwrap();
+        });
+
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(request).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        let events = notifications.lock().unwrap().clone();
+        (response, events)
+    }
+
+    #[test]
+    fn routes_health_and_notifications() {
+        let health = route("GET", "/health", b"");
+        assert_eq!(health.status, 200);
+        assert_eq!(health.body, RES_OK);
+        assert_eq!(health.notification, None);
+
+        for (path, expected) in [
+            ("/notifications/stop", NotificationEvent::Stop),
+            (
+                "/notifications/notification",
+                NotificationEvent::Notification,
+            ),
+        ] {
+            let result = route("POST", path, b"");
+            assert_eq!(result.status, 200);
+            assert_eq!(result.notification, Some(expected));
+        }
+    }
+
+    #[test]
+    fn maps_agent_events_and_rejects_unknown_json() {
+        let completed = route(
+            "POST",
+            "/agent-events",
+            br#"{"type":"agent_turn.completed"}"#,
+        );
+        assert_eq!(completed.status, 200);
+        assert_eq!(completed.notification, Some(NotificationEvent::Stop));
+
+        let alert = route("POST", "/agent-events", br#"{"type":"alert.requested"}"#);
+        assert_eq!(alert.status, 200);
+        assert_eq!(alert.notification, Some(NotificationEvent::Notification));
+
+        for body in [br#"{"type":"unknown"}"#.as_slice(), b"not-json"] {
+            let result = route("POST", "/agent-events", body);
+            assert_eq!(result.status, 400);
+            assert_eq!(result.notification, None);
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_routes() {
+        for (method, path) in [
+            ("POST", "/notifications"),
+            ("GET", "/notifications/stop"),
+            ("POST", "/notifications/unknown"),
+            ("GET", "/"),
+        ] {
+            assert_eq!(route(method, path, b"").status, 404);
+        }
+    }
+
+    #[test]
+    fn serves_http_and_notifies_after_a_valid_request() {
+        let (response, notifications) = round_trip(
+            b"POST /agent-events HTTP/1.1\r\nHost: localhost\r\nContent-Length: 31\r\n\r\n{\"type\":\"agent_turn.completed\"}",
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with(RES_OK));
+        assert_eq!(notifications, vec![NotificationEvent::Stop]);
+    }
+
+    #[test]
+    fn rejects_oversized_http_bodies_without_notifying() {
+        let (response, notifications) = round_trip(
+            b"POST /notifications/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2048\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+        assert!(response.ends_with(RES_PAYLOAD_TOO_LARGE));
+        assert!(notifications.is_empty());
+    }
+}

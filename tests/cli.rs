@@ -1,0 +1,59 @@
+use std::process::Command;
+
+fn run(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_zundamonotify"))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn help_and_no_arguments_succeed() {
+    for args in [&[][..], &["--help"][..], &["-h"][..]] {
+        let output = run(args);
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("zundamonotify"));
+        assert!(stdout.contains("status"));
+        assert!(stdout.contains("serve"));
+        assert!(!stdout.contains("install"));
+        assert!(!stdout.contains("uninstall"));
+    }
+}
+
+#[test]
+fn version_comes_from_the_cargo_manifest() {
+    for flag in ["--version", "-v"] {
+        let output = run(&[flag]);
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+}
+
+#[test]
+fn unknown_commands_print_help_and_fail() {
+    let output = run(&["unknown"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("つかいかたなのだ")
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn invalid_ports_fail_with_the_existing_message() {
+    for port in ["abc", "99999", "3.14"] {
+        let output = run(&["serve", "--port", port]);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("ポートは 0〜65535 の整数を指定するのだ")
+        );
+    }
+}

@@ -68,6 +68,17 @@ zundamonotify status
 nix run github:9sako6/zundamonotify -- --help
 ```
 
+## 開発するのだ
+
+Rustのツールチェーンを用意して、テストとビルドを実行するのだ。
+
+```bash
+mise install
+mise run test
+mise run build
+nix flake check
+```
+
 ## ライセンスなのだ
 
 ### VOICEVOX

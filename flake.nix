@@ -24,6 +24,15 @@
         };
       };
 
+      devShells.${system}.default = pkgs.mkShell {
+        packages = [
+          pkgs.cargo
+          pkgs.clippy
+          pkgs.rustc
+          pkgs.rustfmt
+        ];
+      };
+
       darwinModules.default = import ./nix/module.nix { inherit self; };
 
       packages.${system}.default = package;
