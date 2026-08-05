@@ -6,9 +6,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const RES_OK: &str = "{\"ok\":true}";
 const RES_NOT_FOUND: &str = "{\"error\":\"Not Found\"}";
@@ -19,6 +20,10 @@ const RES_PAYLOAD_TOO_LARGE: &str = "{\"error\":\"Payload Too Large\"}";
 const MAX_BODY_BYTES: usize = 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const TOKEN_BYTES: usize = 32;
+const CONNECTION_WORKERS: usize = 4;
+const PENDING_CONNECTIONS: usize = 16;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 pub type NotificationHandler = Arc<dyn Fn(NotificationEvent) + Send + Sync>;
 
@@ -51,15 +56,51 @@ impl Server {
     }
 
     pub fn run(self) -> std::io::Result<()> {
-        for stream in self.listener.incoming() {
-            let stream = stream?;
+        let (sender, receiver) = mpsc::sync_channel(PENDING_CONNECTIONS);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for index in 0..CONNECTION_WORKERS {
             let notify = Arc::clone(&self.notify);
             let token = Arc::clone(&self.token);
-            thread::spawn(move || {
-                let _ = handle_connection(stream, &notify, &token);
-            });
+            let receiver = Arc::clone(&receiver);
+            thread::Builder::new()
+                .name(format!("zundamonotify-http-{index}"))
+                .spawn(move || connection_worker(receiver, notify, token))?;
         }
-        Ok(())
+
+        loop {
+            match self.listener.accept() {
+                Ok((stream, _)) => match sender.try_send(stream) {
+                    Ok(()) | Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "all connection workers stopped",
+                        ));
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => thread::sleep(ACCEPT_RETRY_DELAY),
+            }
+        }
+    }
+}
+
+fn connection_worker(
+    receiver: Arc<Mutex<Receiver<TcpStream>>>,
+    notify: NotificationHandler,
+    token: Arc<str>,
+) {
+    loop {
+        let stream = match receiver.lock() {
+            Ok(receiver) => receiver.recv(),
+            Err(_) => return,
+        };
+        match stream {
+            Ok(stream) => {
+                let _ = handle_connection(stream, &notify, &token);
+            }
+            Err(_) => return,
+        }
     }
 }
 
@@ -212,19 +253,25 @@ fn handle_connection(
     notify: &NotificationHandler,
     token: &str,
 ) -> std::io::Result<()> {
+    handle_connection_with_timeout(&mut stream, notify, token, REQUEST_TIMEOUT)
+}
+
+fn handle_connection_with_timeout(
+    stream: &mut TcpStream,
+    notify: &NotificationHandler,
+    token: &str,
+    timeout: Duration,
+) -> std::io::Result<()> {
     let port = stream.local_addr()?.port();
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let deadline = Instant::now() + timeout;
+    stream.set_write_timeout(Some(timeout))?;
     let mut request = Vec::new();
     let header_end = loop {
         if request.len() > MAX_HEADER_BYTES {
-            return write_response(
-                &mut stream,
-                response(400, "Bad Request", RES_BAD_REQUEST, None),
-            );
+            return write_response(stream, response(400, "Bad Request", RES_BAD_REQUEST, None));
         }
         let mut buffer = [0_u8; 2048];
-        let read = stream.read(&mut buffer)?;
+        let read = read_before(stream, &mut buffer, deadline)?;
         if read == 0 {
             return Ok(());
         }
@@ -237,18 +284,12 @@ fn handle_connection(
     let headers = String::from_utf8_lossy(&request[..header_end]);
     let mut lines = headers.split("\r\n");
     let Some(request_line) = lines.next() else {
-        return write_response(
-            &mut stream,
-            response(400, "Bad Request", RES_BAD_REQUEST, None),
-        );
+        return write_response(stream, response(400, "Bad Request", RES_BAD_REQUEST, None));
     };
     let mut parts = request_line.split_whitespace();
     let (Some(method), Some(path), Some(_version)) = (parts.next(), parts.next(), parts.next())
     else {
-        return write_response(
-            &mut stream,
-            response(400, "Bad Request", RES_BAD_REQUEST, None),
-        );
+        return write_response(stream, response(400, "Bad Request", RES_BAD_REQUEST, None));
     };
     let method = method.to_owned();
     let path = path.to_owned();
@@ -268,14 +309,14 @@ fn handle_connection(
     }
     if content_length > MAX_BODY_BYTES {
         return write_response(
-            &mut stream,
+            stream,
             response(413, "Payload Too Large", RES_PAYLOAD_TOO_LARGE, None),
         );
     }
 
     while request.len() < header_end + content_length {
         let mut buffer = [0_u8; 1024];
-        let read = stream.read(&mut buffer)?;
+        let read = read_before(stream, &mut buffer, deadline)?;
         if read == 0 {
             break;
         }
@@ -291,11 +332,25 @@ fn handle_connection(
         port,
     );
     let notification = result.notification;
-    write_response(&mut stream, result)?;
+    write_response(stream, result)?;
     if let Some(event) = notification {
         notify(event);
     }
     Ok(())
+}
+
+fn read_before(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+    deadline: Instant,
+) -> std::io::Result<usize> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "request deadline exceeded")
+        })?;
+    stream.set_read_timeout(Some(remaining))?;
+    stream.read(buffer)
 }
 
 fn write_response(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
@@ -351,6 +406,30 @@ mod tests {
         server.join().unwrap();
         let events = notifications.lock().unwrap().clone();
         (response, events)
+    }
+
+    #[test]
+    fn request_deadline_is_not_renewed_by_trickled_bytes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handler: NotificationHandler = Arc::new(|_| {});
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle_connection_with_timeout(&mut stream, &handler, TOKEN, Duration::from_millis(50))
+        });
+
+        let mut stream = TcpStream::connect(address).unwrap();
+        for _ in 0..5 {
+            if stream.write_all(b"G").is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let error = server.join().unwrap().unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ));
     }
 
     #[test]
