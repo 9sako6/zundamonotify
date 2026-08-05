@@ -12,6 +12,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(1500);
 pub const DEFAULT_COMPLETION_DELAY: Duration = Duration::from_millis(2000);
 const MAX_IGNORED_SESSIONS: usize = 1024;
+const READ_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_BYTES_PER_POLL: usize = 256 * 1024;
+const MAX_LINE_BYTES: usize = 64 * 1024;
 
 pub type CompletionHandler = Arc<dyn Fn() + Send + Sync>;
 
@@ -141,6 +144,7 @@ struct TrackedFile {
     identity: (u64, u64),
     offset: u64,
     partial: Vec<u8>,
+    discarding_oversized_line: bool,
     parser: ParserState,
 }
 
@@ -150,8 +154,44 @@ impl TrackedFile {
             identity: (metadata.dev(), metadata.ino()),
             offset: 0,
             partial: Vec::new(),
+            discarding_oversized_line: false,
             parser,
         }
+    }
+
+    fn read_lines(&mut self, file: &mut File, available: u64) -> std::io::Result<Vec<Vec<u8>>> {
+        let mut lines = Vec::new();
+        let mut remaining = available.min(MAX_BYTES_PER_POLL as u64) as usize;
+        let mut buffer = [0_u8; READ_CHUNK_BYTES];
+
+        while remaining > 0 {
+            let requested = remaining.min(buffer.len());
+            let read = file.read(&mut buffer[..requested])?;
+            if read == 0 {
+                break;
+            }
+            self.offset += read as u64;
+            remaining -= read;
+
+            for byte in &buffer[..read] {
+                if self.discarding_oversized_line {
+                    if *byte == b'\n' {
+                        self.discarding_oversized_line = false;
+                    }
+                    continue;
+                }
+                if *byte == b'\n' {
+                    lines.push(std::mem::take(&mut self.partial));
+                } else if self.partial.len() < MAX_LINE_BYTES {
+                    self.partial.push(*byte);
+                } else {
+                    self.partial.clear();
+                    self.discarding_oversized_line = true;
+                }
+            }
+        }
+
+        Ok(lines)
     }
 }
 
@@ -409,19 +449,11 @@ impl LogMonitor {
         if file.seek(SeekFrom::Start(entry.offset)).is_err() {
             return;
         }
-        let mut bytes = Vec::new();
         let remaining = metadata.len() - entry.offset;
-        if file.take(remaining).read_to_end(&mut bytes).is_err() {
+        let Ok(lines) = entry.read_lines(&mut file, remaining) else {
             return;
-        }
-        entry.offset = metadata.len();
-        entry.partial.extend(bytes);
+        };
 
-        let mut lines = Vec::new();
-        while let Some(index) = entry.partial.iter().position(|byte| *byte == b'\n') {
-            let line = entry.partial.drain(..=index).collect::<Vec<_>>();
-            lines.push(line[..line.len() - 1].to_vec());
-        }
         for line in lines {
             let line = String::from_utf8_lossy(&line);
             if line.trim().is_empty() || !entry.parser.process_line(&line) || !notify {
@@ -484,11 +516,15 @@ mod tests {
     }
 
     fn append(path: &Path, text: &str) {
+        append_bytes(path, text.as_bytes());
+    }
+
+    fn append_bytes(path: &Path, bytes: &[u8]) {
         OpenOptions::new()
             .append(true)
             .open(path)
             .unwrap()
-            .write_all(text.as_bytes())
+            .write_all(bytes)
             .unwrap();
     }
 
@@ -693,6 +729,57 @@ mod tests {
         monitor.poll(SystemTime::now());
         assert_eq!(count.load(Ordering::SeqCst), 0);
         wait_for(&count, 1);
+    }
+
+    #[test]
+    fn oversized_records_are_discarded_without_losing_the_next_event() {
+        let root = TempDir::new("oversized");
+        let file = root.0.join("events.log");
+        write(&file, "").unwrap();
+        let (count, handler) = counter();
+        let mut monitor = LogMonitor::new(
+            MonitorSource::OpenCode {
+                log_path: file.clone(),
+            },
+            Duration::ZERO,
+            handler,
+        );
+        monitor.poll(SystemTime::now());
+
+        let mut records = vec![b'x'; MAX_LINE_BYTES + 1];
+        records.extend_from_slice(b"\nmessage=\"exiting loop\" session.id=valid\n");
+        append_bytes(&file, &records);
+        monitor.poll(SystemTime::now());
+
+        wait_for(&count, 1);
+        let tracked = monitor.tracked.get(&file).unwrap();
+        assert!(tracked.partial.len() <= MAX_LINE_BYTES);
+        assert!(!tracked.discarding_oversized_line);
+    }
+
+    #[test]
+    fn each_poll_reads_only_its_byte_budget() {
+        let root = TempDir::new("poll-budget");
+        let file = root.0.join("events.log");
+        write(&file, "").unwrap();
+        let (_, handler) = counter();
+        let mut monitor = LogMonitor::new(
+            MonitorSource::OpenCode {
+                log_path: file.clone(),
+            },
+            Duration::ZERO,
+            handler,
+        );
+        monitor.poll(SystemTime::now());
+
+        let records = vec![b'x'; MAX_BYTES_PER_POLL + 1];
+        append_bytes(&file, &records);
+        monitor.poll(SystemTime::now());
+
+        let tracked = monitor.tracked.get(&file).unwrap();
+        assert_eq!(tracked.offset, MAX_BYTES_PER_POLL as u64);
+        assert!(tracked.partial.len() <= MAX_LINE_BYTES);
+        assert!(tracked.discarding_oversized_line);
     }
 
     #[test]
