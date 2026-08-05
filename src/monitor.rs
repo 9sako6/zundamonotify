@@ -184,6 +184,13 @@ struct TrackedFile {
     partial: Vec<u8>,
     discarding_oversized_line: bool,
     parser: ParserState,
+    lifecycle: FileLifecycle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileLifecycle {
+    Priming,
+    Live,
 }
 
 impl TrackedFile {
@@ -194,6 +201,7 @@ impl TrackedFile {
             partial: Vec::new(),
             discarding_oversized_line: false,
             parser,
+            lifecycle: FileLifecycle::Priming,
         }
     }
 
@@ -423,7 +431,6 @@ fn read_field(line: &str, name: &str) -> Option<String> {
 pub struct LogMonitor {
     source: MonitorSource,
     tracked: HashMap<PathBuf, TrackedFile>,
-    has_primed: bool,
     dispatcher: CompletionDispatcher,
 }
 
@@ -443,7 +450,6 @@ impl LogMonitor {
         Self {
             source,
             tracked: HashMap::new(),
-            has_primed: false,
             dispatcher,
         }
     }
@@ -459,23 +465,15 @@ impl LogMonitor {
         }
         self.tracked
             .retain(|path, _| active.contains(path) && path.exists());
-        self.has_primed = true;
     }
 
     fn poll_file(&mut self, path: &Path, metadata: &Metadata) {
         let identity = (metadata.dev(), metadata.ino());
-        let mut notify = self.has_primed;
         let replaced = self
             .tracked
             .get(path)
             .is_some_and(|entry| entry.identity != identity || metadata.len() < entry.offset);
-        if replaced {
-            self.tracked.insert(
-                path.to_owned(),
-                TrackedFile::new(metadata, self.source.new_state()),
-            );
-            notify = false;
-        } else if !self.tracked.contains_key(path) {
+        if replaced || !self.tracked.contains_key(path) {
             self.tracked.insert(
                 path.to_owned(),
                 TrackedFile::new(metadata, self.source.new_state()),
@@ -483,7 +481,9 @@ impl LogMonitor {
         }
 
         let entry = self.tracked.get_mut(path).expect("tracked file exists");
+        let notify = entry.lifecycle == FileLifecycle::Live;
         if metadata.len() <= entry.offset {
+            entry.lifecycle = FileLifecycle::Live;
             return;
         }
         let Ok(mut file) = File::open(path) else {
@@ -507,6 +507,9 @@ impl LogMonitor {
         }
         if completed {
             self.dispatcher.notify();
+        }
+        if entry.offset >= metadata.len() {
+            entry.lifecycle = FileLifecycle::Live;
         }
     }
 }
@@ -747,6 +750,43 @@ mod tests {
         append(&file, "message=\"exiting loop\" session.id=after-replace\n");
         monitor.poll(SystemTime::now());
         wait_for(&count, 3);
+    }
+
+    #[test]
+    fn files_discovered_after_startup_prime_existing_history() {
+        let root = TempDir::new("late-file");
+        let file = root.0.join("events.log");
+        let (count, handler) = counter();
+        let mut monitor = LogMonitor::new(
+            MonitorSource::OpenCode {
+                log_path: file.clone(),
+            },
+            Duration::ZERO,
+            handler,
+        );
+
+        monitor.poll(SystemTime::now());
+        let mut history = b"message=\"exiting loop\" session.id=historical\n".to_vec();
+        history.extend(vec![b'x'; MAX_BYTES_PER_POLL]);
+        history.push(b'\n');
+        write(&file, history).unwrap();
+        monitor.poll(SystemTime::now());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            monitor.tracked.get(&file).unwrap().lifecycle,
+            FileLifecycle::Priming
+        );
+
+        monitor.poll(SystemTime::now());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            monitor.tracked.get(&file).unwrap().lifecycle,
+            FileLifecycle::Live
+        );
+
+        append(&file, "message=\"exiting loop\" session.id=new\n");
+        monitor.poll(SystemTime::now());
+        wait_for(&count, 1);
     }
 
     #[test]
