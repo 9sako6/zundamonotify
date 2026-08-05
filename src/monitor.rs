@@ -6,6 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +18,43 @@ const MAX_BYTES_PER_POLL: usize = 256 * 1024;
 const MAX_LINE_BYTES: usize = 64 * 1024;
 
 pub type CompletionHandler = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone)]
+struct CompletionDispatcher {
+    sender: Option<SyncSender<()>>,
+    fallback: CompletionHandler,
+}
+
+impl CompletionDispatcher {
+    fn new(delay: Duration, handler: CompletionHandler) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let fallback = Arc::clone(&handler);
+        let sender = thread::Builder::new()
+            .name("zundamonotify-completions".to_owned())
+            .spawn(move || {
+                while receiver.recv().is_ok() {
+                    if !delay.is_zero() {
+                        thread::sleep(delay);
+                    }
+                    while receiver.try_recv().is_ok() {}
+                    handler();
+                }
+            })
+            .ok()
+            .map(|_| sender);
+        Self { sender, fallback }
+    }
+
+    fn notify(&self) {
+        let Some(sender) = &self.sender else {
+            (self.fallback)();
+            return;
+        };
+        match sender.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) | Err(TrySendError::Disconnected(())) => {}
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum MonitorSource {
@@ -386,8 +424,7 @@ pub struct LogMonitor {
     source: MonitorSource,
     tracked: HashMap<PathBuf, TrackedFile>,
     has_primed: bool,
-    completion_delay: Duration,
-    on_complete: CompletionHandler,
+    dispatcher: CompletionDispatcher,
 }
 
 impl LogMonitor {
@@ -396,12 +433,18 @@ impl LogMonitor {
         completion_delay: Duration,
         on_complete: CompletionHandler,
     ) -> Self {
+        Self::with_dispatcher(
+            source,
+            CompletionDispatcher::new(completion_delay, on_complete),
+        )
+    }
+
+    fn with_dispatcher(source: MonitorSource, dispatcher: CompletionDispatcher) -> Self {
         Self {
             source,
             tracked: HashMap::new(),
             has_primed: false,
-            completion_delay,
-            on_complete,
+            dispatcher,
         }
     }
 
@@ -454,32 +497,30 @@ impl LogMonitor {
             return;
         };
 
+        let mut completed = false;
         for line in lines {
             let line = String::from_utf8_lossy(&line);
             if line.trim().is_empty() || !entry.parser.process_line(&line) || !notify {
                 continue;
             }
-            let delay = self.completion_delay;
-            let handler = Arc::clone(&self.on_complete);
-            thread::spawn(move || {
-                if !delay.is_zero() {
-                    thread::sleep(delay);
-                }
-                handler();
-            });
+            completed = true;
+        }
+        if completed {
+            self.dispatcher.notify();
         }
     }
 }
 
 pub fn start_default_monitors(on_complete: CompletionHandler) {
+    let dispatcher = CompletionDispatcher::new(DEFAULT_COMPLETION_DELAY, on_complete);
     for source in [
         MonitorSource::codex_default(),
         MonitorSource::claude_code_default(),
         MonitorSource::opencode_default(),
     ] {
-        let handler = Arc::clone(&on_complete);
+        let dispatcher = dispatcher.clone();
         thread::spawn(move || {
-            let mut monitor = LogMonitor::new(source, DEFAULT_COMPLETION_DELAY, handler);
+            let mut monitor = LogMonitor::with_dispatcher(source, dispatcher);
             loop {
                 monitor.poll(SystemTime::now());
                 thread::sleep(DEFAULT_POLL_INTERVAL);
@@ -783,6 +824,32 @@ mod tests {
     }
 
     #[test]
+    fn completion_bursts_are_coalesced() {
+        let root = TempDir::new("completion-burst");
+        let file = root.0.join("events.log");
+        write(&file, "").unwrap();
+        let (count, handler) = counter();
+        let mut monitor = LogMonitor::new(
+            MonitorSource::OpenCode {
+                log_path: file.clone(),
+            },
+            Duration::from_millis(20),
+            handler,
+        );
+        monitor.poll(SystemTime::now());
+
+        let records = (0..100)
+            .map(|index| format!("message=\"exiting loop\" session.id=session-{index}\n"))
+            .collect::<String>();
+        append(&file, &records);
+        monitor.poll(SystemTime::now());
+
+        wait_for(&count, 1);
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn claude_monitors_multiple_projects() {
         let root = TempDir::new("claude-projects");
         let file_a = root.0.join("project-a/session-a.jsonl");
@@ -796,7 +863,7 @@ mod tests {
             MonitorSource::ClaudeCode {
                 projects_dir: root.0.clone(),
             },
-            Duration::ZERO,
+            Duration::from_millis(20),
             handler,
         );
         monitor.poll(SystemTime::now());
@@ -804,7 +871,9 @@ mod tests {
         append(&file_a, event);
         append(&file_b, event);
         monitor.poll(SystemTime::now());
-        wait_for(&count, 2);
+        wait_for(&count, 1);
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
