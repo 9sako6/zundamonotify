@@ -1,7 +1,11 @@
 use crate::NotificationEvent;
 use serde_json::Value;
+use std::env;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -9,37 +13,61 @@ use std::time::Duration;
 const RES_OK: &str = "{\"ok\":true}";
 const RES_NOT_FOUND: &str = "{\"error\":\"Not Found\"}";
 const RES_BAD_REQUEST: &str = "{\"error\":\"Bad Request\"}";
+const RES_UNAUTHORIZED: &str = "{\"error\":\"Unauthorized\"}";
+const RES_FORBIDDEN: &str = "{\"error\":\"Forbidden\"}";
 const RES_PAYLOAD_TOO_LARGE: &str = "{\"error\":\"Payload Too Large\"}";
 const MAX_BODY_BYTES: usize = 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+const TOKEN_BYTES: usize = 32;
 
 pub type NotificationHandler = Arc<dyn Fn(NotificationEvent) + Send + Sync>;
 
 pub struct Server {
     listener: TcpListener,
     notify: NotificationHandler,
+    token: Arc<str>,
+    token_path: PathBuf,
 }
 
 impl Server {
     pub fn bind(port: u16, notify: NotificationHandler) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
-        Ok(Self { listener, notify })
+        let token_path = token_path()?;
+        let token = install_token(&token_path)?;
+        Ok(Self {
+            listener,
+            notify,
+            token: token.into(),
+            token_path,
+        })
     }
 
     pub fn port(&self) -> std::io::Result<u16> {
         Ok(self.listener.local_addr()?.port())
     }
 
+    pub fn token_path(&self) -> &Path {
+        &self.token_path
+    }
+
     pub fn run(self) -> std::io::Result<()> {
         for stream in self.listener.incoming() {
             let stream = stream?;
             let notify = Arc::clone(&self.notify);
+            let token = Arc::clone(&self.token);
             thread::spawn(move || {
-                let _ = handle_connection(stream, &notify);
+                let _ = handle_connection(stream, &notify, &token);
             });
         }
         Ok(())
     }
+}
+
+#[derive(Default)]
+struct RequestHeaders {
+    authorization: Option<String>,
+    content_type: Option<String>,
+    origin: Option<String>,
 }
 
 struct Response {
@@ -49,7 +77,14 @@ struct Response {
     notification: Option<NotificationEvent>,
 }
 
-fn route(method: &str, path: &str, body: &[u8]) -> Response {
+fn route(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    headers: &RequestHeaders,
+    token: &str,
+    port: u16,
+) -> Response {
     if method == "GET" && path == "/health" {
         return response(200, "OK", RES_OK, None);
     }
@@ -60,6 +95,30 @@ fn route(method: &str, path: &str, body: &[u8]) -> Response {
             "/notifications/notification" => Some(NotificationEvent::Notification),
             _ => None,
         };
+        if event.is_none() && path != "/agent-events" {
+            return response(404, "Not Found", RES_NOT_FOUND, None);
+        }
+        if !headers
+            .authorization
+            .as_deref()
+            .is_some_and(|header| bearer_matches(header, token))
+        {
+            return response(401, "Unauthorized", RES_UNAUTHORIZED, None);
+        }
+        if headers.origin.as_deref().is_some_and(|origin| {
+            origin != format!("http://127.0.0.1:{port}")
+                && origin != format!("http://localhost:{port}")
+        }) {
+            return response(403, "Forbidden", RES_FORBIDDEN, None);
+        }
+        if !headers
+            .content_type
+            .as_deref()
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        {
+            return response(400, "Bad Request", RES_BAD_REQUEST, None);
+        }
         if event.is_some() {
             return response(200, "OK", RES_OK, event);
         }
@@ -83,6 +142,57 @@ fn route(method: &str, path: &str, body: &[u8]) -> Response {
     response(404, "Not Found", RES_NOT_FOUND, None)
 }
 
+fn bearer_matches(header: &str, token: &str) -> bool {
+    let expected = format!("Bearer {token}");
+    header.len() == expected.len()
+        && header
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0_u8, |difference, (actual, expected)| {
+                difference | (actual ^ expected)
+            })
+            == 0
+}
+
+fn token_path() -> std::io::Result<PathBuf> {
+    let home = env::var_os("HOME").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "HOME is required to store the server token",
+        )
+    })?;
+    Ok(PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("zundamonotify")
+        .join("server-token"))
+}
+
+fn install_token(path: &Path) -> std::io::Result<String> {
+    let mut random = File::open("/dev/urandom")?;
+    let mut bytes = [0_u8; TOKEN_BYTES];
+    random.read_exact(&mut bytes)?;
+    let token = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid token path")
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(token.as_bytes())?;
+    file.sync_all()?;
+    Ok(token)
+}
+
 fn response(
     status: u16,
     reason: &'static str,
@@ -97,7 +207,12 @@ fn response(
     }
 }
 
-fn handle_connection(mut stream: TcpStream, notify: &NotificationHandler) -> std::io::Result<()> {
+fn handle_connection(
+    mut stream: TcpStream,
+    notify: &NotificationHandler,
+    token: &str,
+) -> std::io::Result<()> {
+    let port = stream.local_addr()?.port();
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let mut request = Vec::new();
@@ -137,11 +252,20 @@ fn handle_connection(mut stream: TcpStream, notify: &NotificationHandler) -> std
     };
     let method = method.to_owned();
     let path = path.to_owned();
-    let content_length = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+    let mut content_length = 0;
+    let mut request_headers = RequestHeaders::default();
+    for (name, value) in lines.filter_map(|line| line.split_once(':')) {
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse::<usize>().unwrap_or(0);
+        } else if name.eq_ignore_ascii_case("authorization") {
+            request_headers.authorization = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("content-type") {
+            request_headers.content_type = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("origin") {
+            request_headers.origin = Some(value.to_owned());
+        }
+    }
     if content_length > MAX_BODY_BYTES {
         return write_response(
             &mut stream,
@@ -158,7 +282,14 @@ fn handle_connection(mut stream: TcpStream, notify: &NotificationHandler) -> std
         request.extend_from_slice(&buffer[..read]);
     }
     let available = request.len().saturating_sub(header_end).min(content_length);
-    let result = route(&method, &path, &request[header_end..header_end + available]);
+    let result = route(
+        &method,
+        &path,
+        &request[header_end..header_end + available],
+        &request_headers,
+        token,
+        port,
+    );
     let notification = result.notification;
     write_response(&mut stream, result)?;
     if let Some(event) = notification {
@@ -185,6 +316,20 @@ mod tests {
     use std::net::{Shutdown, TcpStream};
     use std::sync::Mutex;
 
+    const TOKEN: &str = "test-token";
+
+    fn authorized_headers() -> RequestHeaders {
+        RequestHeaders {
+            authorization: Some(format!("Bearer {TOKEN}")),
+            content_type: Some("application/json".to_owned()),
+            origin: None,
+        }
+    }
+
+    fn test_route(method: &str, path: &str, body: &[u8]) -> Response {
+        route(method, path, body, &authorized_headers(), TOKEN, 12378)
+    }
+
     fn round_trip(request: &[u8]) -> (String, Vec<NotificationEvent>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -195,7 +340,7 @@ mod tests {
         });
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle_connection(stream, &handler).unwrap();
+            handle_connection(stream, &handler, TOKEN).unwrap();
         });
 
         let mut stream = TcpStream::connect(address).unwrap();
@@ -210,7 +355,14 @@ mod tests {
 
     #[test]
     fn routes_health_and_notifications() {
-        let health = route("GET", "/health", b"");
+        let health = route(
+            "GET",
+            "/health",
+            b"",
+            &RequestHeaders::default(),
+            TOKEN,
+            12378,
+        );
         assert_eq!(health.status, 200);
         assert_eq!(health.body, RES_OK);
         assert_eq!(health.notification, None);
@@ -222,7 +374,7 @@ mod tests {
                 NotificationEvent::Notification,
             ),
         ] {
-            let result = route("POST", path, b"");
+            let result = test_route("POST", path, b"");
             assert_eq!(result.status, 200);
             assert_eq!(result.notification, Some(expected));
         }
@@ -230,7 +382,7 @@ mod tests {
 
     #[test]
     fn maps_agent_events_and_rejects_unknown_json() {
-        let completed = route(
+        let completed = test_route(
             "POST",
             "/agent-events",
             br#"{"type":"agent_turn.completed"}"#,
@@ -238,12 +390,12 @@ mod tests {
         assert_eq!(completed.status, 200);
         assert_eq!(completed.notification, Some(NotificationEvent::Stop));
 
-        let alert = route("POST", "/agent-events", br#"{"type":"alert.requested"}"#);
+        let alert = test_route("POST", "/agent-events", br#"{"type":"alert.requested"}"#);
         assert_eq!(alert.status, 200);
         assert_eq!(alert.notification, Some(NotificationEvent::Notification));
 
         for body in [br#"{"type":"unknown"}"#.as_slice(), b"not-json"] {
-            let result = route("POST", "/agent-events", body);
+            let result = test_route("POST", "/agent-events", body);
             assert_eq!(result.status, 400);
             assert_eq!(result.notification, None);
         }
@@ -257,14 +409,44 @@ mod tests {
             ("POST", "/notifications/unknown"),
             ("GET", "/"),
         ] {
-            assert_eq!(route(method, path, b"").status, 404);
+            assert_eq!(test_route(method, path, b"").status, 404);
         }
+    }
+
+    #[test]
+    fn rejects_unauthorized_notification_requests() {
+        for authorization in [None, Some("Bearer wrong-token".to_owned())] {
+            let headers = RequestHeaders {
+                authorization,
+                content_type: Some("application/json".to_owned()),
+                origin: None,
+            };
+            let result = route("POST", "/notifications/stop", b"", &headers, TOKEN, 12378);
+            assert_eq!(result.status, 401);
+            assert_eq!(result.notification, None);
+        }
+    }
+
+    #[test]
+    fn rejects_untrusted_origins_and_content_types() {
+        let mut headers = authorized_headers();
+        headers.origin = Some("https://example.com".to_owned());
+        let untrusted_origin = route("POST", "/notifications/stop", b"", &headers, TOKEN, 12378);
+        assert_eq!(untrusted_origin.status, 403);
+        assert_eq!(untrusted_origin.notification, None);
+
+        headers.origin = None;
+        headers.content_type = Some("text/plain".to_owned());
+        let unexpected_content_type =
+            route("POST", "/notifications/stop", b"", &headers, TOKEN, 12378);
+        assert_eq!(unexpected_content_type.status, 400);
+        assert_eq!(unexpected_content_type.notification, None);
     }
 
     #[test]
     fn serves_http_and_notifies_after_a_valid_request() {
         let (response, notifications) = round_trip(
-            b"POST /agent-events HTTP/1.1\r\nHost: localhost\r\nContent-Length: 31\r\n\r\n{\"type\":\"agent_turn.completed\"}",
+            b"POST /agent-events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-token\r\nContent-Type: application/json\r\nContent-Length: 31\r\n\r\n{\"type\":\"agent_turn.completed\"}",
         );
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with(RES_OK));

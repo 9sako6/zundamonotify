@@ -79,6 +79,7 @@ fn serve(port: u16) -> Result<(), String> {
         .port()
         .map_err(|error| format!("通知サーバーのポートを確認できなかったのだ：{error}"))?;
     println!("通知サーバーを起動したのだ：http://127.0.0.1:{active_port}");
+    println!("認証トークン：{}", server.token_path().display());
     println!("イベント受信先：POST /agent-events");
 
     let completion_handler =
