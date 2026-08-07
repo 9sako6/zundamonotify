@@ -65,7 +65,7 @@ zundamonotify status
 一度だけ実行する場合は `nix run` を使えるのだ。
 
 ```bash
-nix run github:9sako6/zundamonotify -- --help
+nix run github:9sako6/zundamonotify -- help
 ```
 
 ## 開発するのだ

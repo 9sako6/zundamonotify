@@ -10,8 +10,8 @@ const HELP: &str = "zundamonotify - AIエージェントの作業が終わった
 
 使い方:
   zundamonotify status                 稼働状態を確認する
-  zundamonotify --help                 ヘルプを表示する
-  zundamonotify --version              バージョンを表示する
+  zundamonotify help                   ヘルプを表示する
+  zundamonotify version                バージョンを表示する
 
 開発用:
   zundamonotify serve [--port <PORT>]  通知サーバーをフォアグラウンドで起動する";
@@ -30,15 +30,16 @@ fn main() -> ExitCode {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
-        None | Some("--help" | "-h") => {
+        None | Some("help" | "--help" | "-h") => {
             println!("{HELP}");
             Ok(())
         }
-        Some("--version" | "-v") => {
+        Some("version" | "--version" | "-v") => {
             println!(env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some("status") => {
+            println!("バージョン：{}", env!("CARGO_PKG_VERSION"));
             for line in inspect_launch_agent().lines() {
                 println!("{line}");
             }

@@ -9,15 +9,17 @@ fn run(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn help_and_no_arguments_succeed() {
-    for args in [&[][..], &["--help"][..], &["-h"][..]] {
+    for args in [&[][..], &["help"][..], &["--help"][..], &["-h"][..]] {
         let output = run(args);
         assert!(output.status.success());
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("zundamonotify"));
         assert!(stdout.contains("status"));
         assert!(stdout.contains("serve"));
-        assert!(stdout.contains("--help"));
-        assert!(stdout.contains("--version"));
+        assert!(stdout.contains("zundamonotify help"));
+        assert!(stdout.contains("zundamonotify version"));
+        assert!(!stdout.contains("zundamonotify --help"));
+        assert!(!stdout.contains("zundamonotify --version"));
         assert!(!stdout.contains("install"));
         assert!(!stdout.contains("uninstall"));
     }
@@ -25,14 +27,25 @@ fn help_and_no_arguments_succeed() {
 
 #[test]
 fn version_comes_from_the_cargo_manifest() {
-    for flag in ["--version", "-v"] {
-        let output = run(&[flag]);
+    for command in ["version", "--version", "-v"] {
+        let output = run(&[command]);
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),
             env!("CARGO_PKG_VERSION")
         );
     }
+}
+
+#[test]
+fn status_includes_the_version_from_the_cargo_manifest() {
+    let output = run(&["status"]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains(&format!("バージョン：{}", env!("CARGO_PKG_VERSION")))
+    );
 }
 
 #[test]
