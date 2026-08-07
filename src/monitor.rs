@@ -16,6 +16,8 @@ const MAX_IGNORED_SESSIONS: usize = 1024;
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_BYTES_PER_POLL: usize = 256 * 1024;
 const MAX_LINE_BYTES: usize = 64 * 1024;
+const HERMES_MAX_ROWS_PER_POLL: usize = 400;
+const HERMES_SQLITE_BUSY_TIMEOUT_MS: i32 = 200;
 
 pub type CompletionHandler = Arc<dyn Fn() + Send + Sync>;
 
@@ -61,6 +63,7 @@ pub enum MonitorSource {
     Codex { sessions_dir: PathBuf },
     ClaudeCode { projects_dir: PathBuf },
     OpenCode { log_path: PathBuf },
+    Hermes { db_paths: Vec<PathBuf> },
 }
 
 impl MonitorSource {
@@ -85,11 +88,18 @@ impl MonitorSource {
         }
     }
 
+    pub fn hermes_default() -> Self {
+        Self::Hermes {
+            db_paths: hermes_db_paths(),
+        }
+    }
+
     fn list_files(&self, now: SystemTime) -> Vec<PathBuf> {
         match self {
             Self::Codex { sessions_dir } => codex_session_files(sessions_dir, now),
             Self::ClaudeCode { projects_dir } => claude_session_files(projects_dir),
             Self::OpenCode { log_path } => vec![log_path.clone()],
+            Self::Hermes { .. } => Vec::new(),
         }
     }
 
@@ -98,6 +108,7 @@ impl MonitorSource {
             Self::Codex { .. } => ParserState::Codex(CodexState::default()),
             Self::ClaudeCode { .. } => ParserState::ClaudeCode(ClaudeCodeState::default()),
             Self::OpenCode { .. } => ParserState::OpenCode(OpenCodeState::default()),
+            Self::Hermes { .. } => ParserState::Hermes(HermesState::default()),
         }
     }
 }
@@ -106,6 +117,36 @@ fn home_dir() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn hermes_home_dir() -> PathBuf {
+    if let Some(val) = env::var_os("HERMES_HOME") {
+        let s = val.to_string_lossy().trim().to_owned();
+        if !s.is_empty() {
+            return PathBuf::from(s);
+        }
+    }
+    home_dir().join(".hermes")
+}
+
+fn hermes_db_paths() -> Vec<PathBuf> {
+    let home = hermes_home_dir();
+    let mut out = Vec::new();
+    let main = home.join("state.db");
+    out.push(main);
+    let profiles = home.join("profiles");
+    if let Ok(entries) = fs::read_dir(&profiles) {
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|k| k.is_dir()) {
+                continue;
+            }
+            let candidate = entry.path().join("state.db");
+            if candidate.is_file() {
+                out.push(candidate);
+            }
+        }
+    }
+    out
 }
 
 fn codex_session_files(root: &Path, now: SystemTime) -> Vec<PathBuf> {
@@ -246,6 +287,7 @@ enum ParserState {
     Codex(CodexState),
     ClaudeCode(ClaudeCodeState),
     OpenCode(OpenCodeState),
+    Hermes(HermesState),
 }
 
 impl ParserState {
@@ -254,6 +296,7 @@ impl ParserState {
             Self::Codex(state) => state.process_line(line),
             Self::ClaudeCode(state) => state.process_line(line),
             Self::OpenCode(state) => state.process_line(line),
+            Self::Hermes(state) => state.process_line(line),
         }
     }
 }
@@ -396,6 +439,38 @@ impl OpenCodeState {
     }
 }
 
+/// Hermes: state.db watcher
+/// Read-only SQLite polling for ~/.hermes/state.db (+ profiles/*/state.db).
+/// External observation only — never writes.
+#[derive(Debug, Default)]
+struct HermesState {
+}
+
+impl HermesState {
+    fn process_line(&mut self, _line: &str) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+struct HermesTracker {
+    db_path: PathBuf,
+    last_seen_id: i64,
+    priming: bool,
+    last_mtime: Option<SystemTime>,
+}
+
+impl HermesTracker {
+    fn new(db_path: PathBuf) -> Self {
+        Self {
+            db_path,
+            last_seen_id: 0,
+            priming: true,
+            last_mtime: None,
+        }
+    }
+}
+
 fn read_field(line: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=");
     let mut search_from = 0;
@@ -432,6 +507,7 @@ pub struct LogMonitor {
     source: MonitorSource,
     tracked: HashMap<PathBuf, TrackedFile>,
     dispatcher: CompletionDispatcher,
+    hermes: HashMap<PathBuf, HermesTracker>,
 }
 
 impl LogMonitor {
@@ -447,14 +523,25 @@ impl LogMonitor {
     }
 
     fn with_dispatcher(source: MonitorSource, dispatcher: CompletionDispatcher) -> Self {
+        let mut hermes = HashMap::new();
+        if let MonitorSource::Hermes { db_paths } = &source {
+            for p in db_paths {
+                hermes.insert(p.clone(), HermesTracker::new(p.clone()));
+            }
+        }
         Self {
             source,
             tracked: HashMap::new(),
             dispatcher,
+            hermes,
         }
     }
 
     pub fn poll(&mut self, now: SystemTime) {
+        if matches!(self.source, MonitorSource::Hermes { .. }) {
+            self.poll_hermes();
+            return;
+        }
         let files = self.source.list_files(now);
         let active: HashSet<_> = files.iter().cloned().collect();
         for path in files {
@@ -512,6 +599,70 @@ impl LogMonitor {
             entry.lifecycle = FileLifecycle::Live;
         }
     }
+
+    fn poll_hermes(&mut self) {
+        let paths: Vec<PathBuf> = self.hermes.keys().cloned().collect();
+        let mut completed = false;
+        for db_path in paths {
+            let tracker = self.hermes.get_mut(&db_path).expect("tracker exists");
+            if let Ok(meta) = fs::metadata(&db_path) {
+                if let Ok(mtime) = meta.modified() {
+                    tracker.last_mtime = Some(mtime);
+                }
+            } else if tracker.priming {
+                continue;
+            } else {
+                continue;
+            }
+            let uri = format!("file:{}?mode=ro&cache=shared", db_path.display());
+            let conn = match rusqlite::Connection::open_with_flags(
+                &uri,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            ) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let _ = conn.busy_timeout(Duration::from_millis(HERMES_SQLITE_BUSY_TIMEOUT_MS as u64));
+            let priming = tracker.priming;
+            let last = tracker.last_seen_id;
+            if priming {
+                if let Ok(v) = conn.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get::<_, i64>(0)) {
+                    tracker.last_seen_id = v;
+                    tracker.priming = false;
+                }
+                continue;
+            }
+            let mut stmt = match conn.prepare("SELECT id, role, COALESCE(tool_calls,''), COALESCE(finish_reason,''), COALESCE(content,'') FROM messages WHERE id > ?1 ORDER BY id ASC LIMIT ?2") {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let rows = match stmt.query_map(rusqlite::params![last, HERMES_MAX_ROWS_PER_POLL as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            }) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let mut max_id = last;
+            for item in rows.flatten() {
+                let (id, role, tool_calls, finish_reason, content) = item;
+                if id > max_id { max_id = id; }
+                if role != "assistant" { continue; }
+                let is_clarify = tool_calls.contains("\"clarify\"") || tool_calls.contains("\"name\": \"clarify\"");
+                let trimmed = tool_calls.trim();
+                let has_tool_calls = !trimmed.is_empty() && trimmed != "null" && trimmed != "[]";
+                let is_stop = finish_reason == "stop" && !has_tool_calls && !content.trim().is_empty();
+                if is_clarify || is_stop { completed = true; }
+            }
+            tracker.last_seen_id = max_id;
+        }
+        if completed { self.dispatcher.notify(); }
+    }
 }
 
 pub fn start_default_monitors(on_complete: CompletionHandler) {
@@ -520,6 +671,7 @@ pub fn start_default_monitors(on_complete: CompletionHandler) {
         MonitorSource::codex_default(),
         MonitorSource::claude_code_default(),
         MonitorSource::opencode_default(),
+        MonitorSource::hermes_default(),
     ] {
         let dispatcher = dispatcher.clone();
         thread::spawn(move || {
@@ -923,5 +1075,99 @@ mod tests {
             .unwrap()
             .as_secs() as libc::time_t;
         assert_ne!(local_date(now, 0), local_date(now, 1));
+    }
+
+    #[test]
+    fn hermes_detects_stop_and_clarify_rows() {
+        // Verify the row classification heuristics isolated from SQLite.
+        let is_clarify = |tool_calls: &str| {
+            tool_calls.contains("\"clarify\"") || tool_calls.contains("\"name\": \"clarify\"")
+        };
+        let is_stop = |finish_reason: &str, tool_calls: &str, content: &str| {
+            let t = tool_calls.trim();
+            let has_tc = !t.is_empty() && t != "null" && t != "[]";
+            finish_reason == "stop" && !has_tc && !content.trim().is_empty()
+        };
+        assert!(is_clarify(r#"[{"name":"clarify","args":{"question":"?"}}]"#));
+        assert!(is_clarify(r#"{"tool_calls":"clarify"}"#));
+        assert!(!is_clarify(r#"[{"name":"read_file"}]"#));
+        assert!(is_stop("stop", "", "done"));
+        assert!(is_stop("stop", "[]", "done"));
+        assert!(!is_stop("tool_calls", "", "done"));
+        assert!(!is_stop("stop", r#"[{"name":"clarify"}]"#, "done"));
+        assert!(!is_stop("stop", "", "   "));
+    }
+
+    #[test]
+    fn hermes_poll_reads_new_rows_without_writing() {
+        // Integration: create a temp state.db, poll priming then new row.
+        let dir = TempDir::new("hermes-db");
+        let db_path = dir.0.join("state.db");
+        // create minimal schema subset needed by poll_hermes
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, finish_reason TEXT, timestamp REAL);"
+        ).unwrap();
+        // historical row written before monitor starts — should be primed away
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls, finish_reason, timestamp) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params!["s1", "assistant", "old", "", "stop", 1.0],
+        ).unwrap();
+        drop(conn);
+        let (count, handler) = counter();
+        let mut monitor = LogMonitor::new(
+            MonitorSource::Hermes { db_paths: vec![db_path.clone()] },
+            Duration::ZERO,
+            handler,
+        );
+        // first poll primes — no notification for history
+        monitor.poll(SystemTime::now());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        // append a new stop row
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls, finish_reason, timestamp) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params!["s1", "assistant", "done!", "", "stop", 2.0],
+        ).unwrap();
+        drop(conn);
+        monitor.poll(SystemTime::now());
+        wait_for(&count, 1);
+        // append a clarify row -> also notifies (coalesced)
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls, finish_reason, timestamp) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params!["s1", "assistant", "", r#"[{"name":"clarify"}]"#, "", 3.0],
+        ).unwrap();
+        drop(conn);
+        monitor.poll(SystemTime::now());
+        wait_for(&count, 2);
+    }
+
+    #[test]
+    fn hermes_prime_does_not_notify_even_with_clarify_history() {
+        let dir = TempDir::new("hermes-prime");
+        let db_path = dir.0.join("state.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, finish_reason TEXT, timestamp REAL);"
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls, finish_reason, timestamp) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params!["s1", "assistant", "", r#"[{"name":"clarify"}]"#, "", 1.0],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls, finish_reason, timestamp) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params!["s1", "assistant", "old stop", "", "stop", 2.0],
+        ).unwrap();
+        drop(conn);
+        let (count, handler) = counter();
+        let mut monitor = LogMonitor::new(
+            MonitorSource::Hermes { db_paths: vec![db_path.clone()] },
+            Duration::ZERO,
+            handler,
+        );
+        monitor.poll(SystemTime::now());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert!(!monitor.hermes.get(&db_path).unwrap().priming);
     }
 }
