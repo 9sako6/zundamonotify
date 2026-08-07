@@ -1,7 +1,7 @@
 {
   description = "Zundamonotify for macOS";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/705e9929918b43bd7b715dc0a878ac870449bb03";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/cf57e270b44b895e94fcce4b69c80ae5867e5d0b";
 
   outputs =
     { self, nixpkgs }:
