@@ -453,6 +453,7 @@ impl HermesState {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct HermesTracker {
     db_path: PathBuf,
     last_seen_id: i64,
