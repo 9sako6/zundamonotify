@@ -133,7 +133,9 @@ fn hermes_db_paths() -> Vec<PathBuf> {
     let home = hermes_home_dir();
     let mut out = Vec::new();
     let main = home.join("state.db");
-    out.push(main);
+    if main.is_file() {
+        out.push(main);
+    }
     let profiles = home.join("profiles");
     if let Ok(entries) = fs::read_dir(&profiles) {
         for entry in entries.flatten() {
@@ -443,8 +445,7 @@ impl OpenCodeState {
 /// Read-only SQLite polling for ~/.hermes/state.db (+ profiles/*/state.db).
 /// External observation only — never writes.
 #[derive(Debug, Default)]
-struct HermesState {
-}
+struct HermesState {}
 
 impl HermesState {
     fn process_line(&mut self, _line: &str) -> bool {
@@ -453,22 +454,13 @@ impl HermesState {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct HermesTracker {
-    db_path: PathBuf,
-    last_seen_id: i64,
-    priming: bool,
-    last_mtime: Option<SystemTime>,
+    last_seen_id: Option<i64>,
 }
 
 impl HermesTracker {
-    fn new(db_path: PathBuf) -> Self {
-        Self {
-            db_path,
-            last_seen_id: 0,
-            priming: true,
-            last_mtime: None,
-        }
+    fn new() -> Self {
+        Self { last_seen_id: None }
     }
 }
 
@@ -504,6 +496,37 @@ fn read_field(line: &str, name: &str) -> Option<String> {
     serde_json::from_str(raw).ok()
 }
 
+fn is_hermes_clarify(tool_calls: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(tool_calls) else {
+        return false;
+    };
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .any(|item| item.get("name").and_then(Value::as_str) == Some("clarify")),
+        Value::Object(map) => map.get("name").and_then(Value::as_str) == Some("clarify"),
+        _ => false,
+    }
+}
+
+fn is_hermes_stop(finish_reason: &str, tool_calls: &str, content: &str) -> bool {
+    if finish_reason != "stop" || content.trim().is_empty() {
+        return false;
+    }
+    let trimmed = tool_calls.trim();
+    if trimmed.is_empty() || trimmed == "null" || trimmed == "[]" {
+        return true;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return false;
+    };
+    match value {
+        Value::Array(ref items) => items.is_empty(),
+        Value::Null => true,
+        _ => false,
+    }
+}
+
 pub struct LogMonitor {
     source: MonitorSource,
     tracked: HashMap<PathBuf, TrackedFile>,
@@ -527,7 +550,7 @@ impl LogMonitor {
         let mut hermes = HashMap::new();
         if let MonitorSource::Hermes { db_paths } = &source {
             for p in db_paths {
-                hermes.insert(p.clone(), HermesTracker::new(p.clone()));
+                hermes.insert(p.clone(), HermesTracker::new());
             }
         }
         Self {
@@ -606,13 +629,7 @@ impl LogMonitor {
         let mut completed = false;
         for db_path in paths {
             let tracker = self.hermes.get_mut(&db_path).expect("tracker exists");
-            if let Ok(meta) = fs::metadata(&db_path) {
-                if let Ok(mtime) = meta.modified() {
-                    tracker.last_mtime = Some(mtime);
-                }
-            } else if tracker.priming {
-                continue;
-            } else {
+            if fs::metadata(&db_path).is_err() {
                 continue;
             }
             let uri = format!("file:{}?mode=ro&cache=shared", db_path.display());
@@ -624,45 +641,53 @@ impl LogMonitor {
                 Err(_) => continue,
             };
             let _ = conn.busy_timeout(Duration::from_millis(HERMES_SQLITE_BUSY_TIMEOUT_MS as u64));
-            let priming = tracker.priming;
-            let last = tracker.last_seen_id;
-            if priming {
-                if let Ok(v) = conn.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get::<_, i64>(0)) {
-                    tracker.last_seen_id = v;
-                    tracker.priming = false;
+            let Some(last) = tracker.last_seen_id else {
+                if let Ok(v) = conn.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| {
+                    r.get::<_, i64>(0)
+                }) {
+                    tracker.last_seen_id = Some(v);
                 }
                 continue;
-            }
+            };
             let mut stmt = match conn.prepare("SELECT id, role, COALESCE(tool_calls,''), COALESCE(finish_reason,''), COALESCE(content,'') FROM messages WHERE id > ?1 ORDER BY id ASC LIMIT ?2") {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let rows = match stmt.query_map(rusqlite::params![last, HERMES_MAX_ROWS_PER_POLL as i64], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            }) {
+            let rows = match stmt.query_map(
+                rusqlite::params![last, HERMES_MAX_ROWS_PER_POLL as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            ) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
             let mut max_id = last;
             for item in rows.flatten() {
                 let (id, role, tool_calls, finish_reason, content) = item;
-                if id > max_id { max_id = id; }
-                if role != "assistant" { continue; }
-                let is_clarify = tool_calls.contains("\"clarify\"") || tool_calls.contains("\"name\": \"clarify\"");
-                let trimmed = tool_calls.trim();
-                let has_tool_calls = !trimmed.is_empty() && trimmed != "null" && trimmed != "[]";
-                let is_stop = finish_reason == "stop" && !has_tool_calls && !content.trim().is_empty();
-                if is_clarify || is_stop { completed = true; }
+                if id > max_id {
+                    max_id = id;
+                }
+                if role != "assistant" {
+                    continue;
+                }
+                if is_hermes_clarify(&tool_calls)
+                    || is_hermes_stop(&finish_reason, &tool_calls, &content)
+                {
+                    completed = true;
+                }
             }
-            tracker.last_seen_id = max_id;
+            tracker.last_seen_id = Some(max_id);
         }
-        if completed { self.dispatcher.notify(); }
+        if completed {
+            self.dispatcher.notify();
+        }
     }
 }
 
@@ -1080,23 +1105,20 @@ mod tests {
 
     #[test]
     fn hermes_detects_stop_and_clarify_rows() {
-        // Verify the row classification heuristics isolated from SQLite.
-        let is_clarify = |tool_calls: &str| {
-            tool_calls.contains("\"clarify\"") || tool_calls.contains("\"name\": \"clarify\"")
-        };
-        let is_stop = |finish_reason: &str, tool_calls: &str, content: &str| {
-            let t = tool_calls.trim();
-            let has_tc = !t.is_empty() && t != "null" && t != "[]";
-            finish_reason == "stop" && !has_tc && !content.trim().is_empty()
-        };
-        assert!(is_clarify(r#"[{"name":"clarify","args":{"question":"?"}}]"#));
-        assert!(is_clarify(r#"{"tool_calls":"clarify"}"#));
-        assert!(!is_clarify(r#"[{"name":"read_file"}]"#));
-        assert!(is_stop("stop", "", "done"));
-        assert!(is_stop("stop", "[]", "done"));
-        assert!(!is_stop("tool_calls", "", "done"));
-        assert!(!is_stop("stop", r#"[{"name":"clarify"}]"#, "done"));
-        assert!(!is_stop("stop", "", "   "));
+        assert!(is_hermes_clarify(
+            r#"[{"name":"clarify","args":{"question":"?"}}]"#
+        ));
+        assert!(is_hermes_clarify(r#"{"name":"clarify"}"#));
+        assert!(!is_hermes_clarify(r#"{"tool_calls":"clarify"}"#));
+        assert!(!is_hermes_clarify(r#"[{"name":"read_file"}]"#));
+        assert!(!is_hermes_clarify("not-json"));
+        assert!(is_hermes_stop("stop", "", "done"));
+        assert!(is_hermes_stop("stop", "[]", "done"));
+        assert!(is_hermes_stop("stop", "null", "done"));
+        assert!(!is_hermes_stop("tool_calls", "", "done"));
+        assert!(!is_hermes_stop("stop", r#"[{"name":"clarify"}]"#, "done"));
+        assert!(!is_hermes_stop("stop", "", "   "));
+        assert!(!is_hermes_stop("stop", "not-json", "done"));
     }
 
     #[test]
@@ -1117,7 +1139,9 @@ mod tests {
         drop(conn);
         let (count, handler) = counter();
         let mut monitor = LogMonitor::new(
-            MonitorSource::Hermes { db_paths: vec![db_path.clone()] },
+            MonitorSource::Hermes {
+                db_paths: vec![db_path.clone()],
+            },
             Duration::ZERO,
             handler,
         );
@@ -1163,12 +1187,14 @@ mod tests {
         drop(conn);
         let (count, handler) = counter();
         let mut monitor = LogMonitor::new(
-            MonitorSource::Hermes { db_paths: vec![db_path.clone()] },
+            MonitorSource::Hermes {
+                db_paths: vec![db_path.clone()],
+            },
             Duration::ZERO,
             handler,
         );
         monitor.poll(SystemTime::now());
         assert_eq!(count.load(Ordering::SeqCst), 0);
-        assert!(!monitor.hermes.get(&db_path).unwrap().priming);
+        assert!(monitor.hermes.get(&db_path).unwrap().last_seen_id.is_some());
     }
 }

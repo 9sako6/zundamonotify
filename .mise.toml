@@ -12,3 +12,19 @@ description = "Build the zundamonotify executable"
 [tasks.test]
 run = "cargo test"
 description = "Run the test suite"
+
+[tasks.fmt]
+run = "cargo fmt --all -- --check"
+description = "Check Rust formatting (rustfmt)"
+
+[tasks.clippy]
+run = "cargo clippy --all-targets -- -D warnings"
+description = "Run clippy (deny warnings)"
+
+[tasks.check]
+run = 'cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test'
+description = "Run fmt, clippy, and tests (same as pre-push / CI)"
+
+[tasks.setup]
+run = "git config core.hooksPath .githooks"
+description = "Install git hooks (fmt/clippy/test on pre-push)"
