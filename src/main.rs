@@ -1,12 +1,14 @@
 use std::env;
 use std::process::ExitCode;
 use std::sync::Arc;
+use zundamonotify::NotificationHandler;
 use zundamonotify::launchd::inspect_launch_agent;
 use zundamonotify::monitor::start_default_monitors;
 use zundamonotify::notifier::{AssetFiles, Notifier};
-use zundamonotify::server::{NotificationHandler, Server};
+use zundamonotify::server::Server;
 
-const HELP: &str = "zundamonotify - AIエージェントの作業が終わったら、ずんだもんの声で知らせるのだ
+const HELP: &str =
+    "zundamonotify - AIエージェントの作業完了や入力待ちを、ずんだもんの声で知らせるのだ
 
 使い方:
   zundamonotify status                 稼働状態を確認する
@@ -72,10 +74,13 @@ fn serve(port: u16) -> Result<(), String> {
         let notifier = notifier.clone();
         Arc::new(move |event| notifier.notify(event))
     };
-    let server = Server::bind(port, notification_handler).map_err(|error| match error.kind() {
-        std::io::ErrorKind::AddrInUse => format!("ポート {port} は使用中なのだ"),
-        _ => format!("通知サーバーを起動できなかったのだ：{error}"),
-    })?;
+    let server =
+        Server::bind(port, Arc::clone(&notification_handler)).map_err(|error| {
+            match error.kind() {
+                std::io::ErrorKind::AddrInUse => format!("ポート {port} は使用中なのだ"),
+                _ => format!("通知サーバーを起動できなかったのだ：{error}"),
+            }
+        })?;
     let active_port = server
         .port()
         .map_err(|error| format!("通知サーバーのポートを確認できなかったのだ：{error}"))?;
@@ -83,9 +88,7 @@ fn serve(port: u16) -> Result<(), String> {
     println!("認証トークン：{}", server.token_path().display());
     println!("イベント受信先：POST /agent-events");
 
-    let completion_handler =
-        Arc::new(move || notifier.notify(zundamonotify::NotificationEvent::Stop));
-    start_default_monitors(completion_handler);
+    start_default_monitors(notification_handler);
     server
         .run()
         .map_err(|error| format!("通知サーバーが停止したのだ：{error}"))

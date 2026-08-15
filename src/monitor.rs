@@ -1,3 +1,4 @@
+use crate::{NotificationEvent, NotificationHandler};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -19,19 +20,23 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 const HERMES_MAX_ROWS_PER_POLL: usize = 400;
 const HERMES_SQLITE_BUSY_TIMEOUT_MS: i32 = 200;
 
-pub type CompletionHandler = Arc<dyn Fn() + Send + Sync>;
-
 #[derive(Clone)]
-struct CompletionDispatcher {
-    sender: Option<SyncSender<()>>,
-    fallback: CompletionHandler,
+struct EventDispatcher {
+    completion: CompletionDispatch,
+    handler: NotificationHandler,
 }
 
-impl CompletionDispatcher {
-    fn new(delay: Duration, handler: CompletionHandler) -> Self {
+#[derive(Clone)]
+enum CompletionDispatch {
+    Background(SyncSender<()>),
+    Inline,
+}
+
+impl EventDispatcher {
+    fn new(delay: Duration, handler: NotificationHandler) -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);
-        let fallback = Arc::clone(&handler);
-        let sender = thread::Builder::new()
+        let background_handler = Arc::clone(&handler);
+        let completion = thread::Builder::new()
             .name("zundamonotify-completions".to_owned())
             .spawn(move || {
                 while receiver.recv().is_ok() {
@@ -39,21 +44,29 @@ impl CompletionDispatcher {
                         thread::sleep(delay);
                     }
                     while receiver.try_recv().is_ok() {}
-                    handler();
+                    background_handler(NotificationEvent::Stop);
                 }
             })
             .ok()
-            .map(|_| sender);
-        Self { sender, fallback }
+            .map_or(CompletionDispatch::Inline, |_| {
+                CompletionDispatch::Background(sender)
+            });
+        Self {
+            completion,
+            handler,
+        }
     }
 
-    fn notify(&self) {
-        let Some(sender) = &self.sender else {
-            (self.fallback)();
-            return;
-        };
-        match sender.try_send(()) {
-            Ok(()) | Err(TrySendError::Full(())) | Err(TrySendError::Disconnected(())) => {}
+    fn dispatch(&self, event: NotificationEvent) {
+        match event {
+            NotificationEvent::Notification => (self.handler)(event),
+            NotificationEvent::Stop => match &self.completion {
+                CompletionDispatch::Background(sender) => match sender.try_send(()) {
+                    Ok(()) | Err(TrySendError::Full(())) => {}
+                    Err(TrySendError::Disconnected(())) => (self.handler)(event),
+                },
+                CompletionDispatch::Inline => (self.handler)(event),
+            },
         }
     }
 }
@@ -293,7 +306,7 @@ enum ParserState {
 }
 
 impl ParserState {
-    fn process_line(&mut self, line: &str) -> bool {
+    fn process_line(&mut self, line: &str) -> Option<NotificationEvent> {
         match self {
             Self::Codex(state) => state.process_line(line),
             Self::ClaudeCode(state) => state.process_line(line),
@@ -306,14 +319,15 @@ impl ParserState {
 #[derive(Debug, Default)]
 struct CodexState {
     last_completed_turn_id: Option<String>,
+    last_input_request_key: Option<String>,
     ignored: bool,
     ignored_turns: HashSet<String>,
 }
 
 impl CodexState {
-    fn process_line(&mut self, line: &str) -> bool {
+    fn process_line(&mut self, line: &str) -> Option<NotificationEvent> {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
-            return false;
+            return None;
         };
         let event_type = value.get("type").and_then(Value::as_str);
         let payload = value.get("payload");
@@ -326,7 +340,7 @@ impl CodexState {
             {
                 self.ignored = true;
             }
-            return false;
+            return None;
         }
 
         if event_type == Some("turn_context") {
@@ -339,15 +353,10 @@ impl CodexState {
             {
                 self.ignored_turns.insert(turn_id.to_owned());
             }
-            return false;
+            return None;
         }
 
-        if event_type != Some("event_msg")
-            || payload.and_then(|p| p.get("type")).and_then(Value::as_str) != Some("task_complete")
-        {
-            return false;
-        }
-
+        let payload_type = payload.and_then(|p| p.get("type")).and_then(Value::as_str);
         let turn_id = payload
             .and_then(|p| p.get("turn_id"))
             .and_then(Value::as_str)
@@ -356,44 +365,142 @@ impl CodexState {
             || turn_id
                 .as_ref()
                 .is_some_and(|id| self.ignored_turns.contains(id))
-            || turn_id
-                .as_ref()
-                .is_some_and(|id| self.last_completed_turn_id.as_ref() == Some(id))
         {
-            return false;
+            return None;
+        }
+
+        if let Some(key) = Self::input_request_key(event_type, payload, line) {
+            if self.last_input_request_key.as_ref() == Some(&key) {
+                return None;
+            }
+            self.last_input_request_key = Some(key);
+            return Some(NotificationEvent::Notification);
+        }
+
+        if event_type != Some("event_msg") || payload_type != Some("task_complete") {
+            return None;
+        }
+        if turn_id
+            .as_ref()
+            .is_some_and(|id| self.last_completed_turn_id.as_ref() == Some(id))
+        {
+            return None;
         }
         self.last_completed_turn_id = turn_id;
-        true
+        Some(NotificationEvent::Stop)
+    }
+
+    fn input_request_key(
+        event_type: Option<&str>,
+        payload: Option<&Value>,
+        line: &str,
+    ) -> Option<String> {
+        let payload = payload?;
+        let payload_type = payload.get("type").and_then(Value::as_str);
+        let request_type = match (event_type, payload_type) {
+            (
+                Some("event_msg"),
+                Some(
+                    request_type @ ("exec_approval_request"
+                    | "request_permissions"
+                    | "request_user_input"
+                    | "elicitation_request"
+                    | "apply_patch_approval_request"),
+                ),
+            ) => request_type,
+            (Some("response_item"), Some("function_call")) => match payload
+                .get("name")
+                .and_then(Value::as_str)
+            {
+                Some(request_type @ ("request_user_input" | "request_permissions")) => request_type,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if request_type == "request_user_input" && Self::request_user_input_is_nonblocking(payload)
+        {
+            return None;
+        }
+        let request_id = ["approval_id", "call_id", "request_id", "id"]
+            .into_iter()
+            .find_map(|field| {
+                payload.get(field).and_then(|value| match value {
+                    Value::String(value) => Some(value.clone()),
+                    Value::Number(value) => Some(value.to_string()),
+                    _ => None,
+                })
+            });
+        Some(format!(
+            "{request_type}:{}",
+            request_id.as_deref().unwrap_or(line)
+        ))
+    }
+
+    fn request_user_input_is_nonblocking(payload: &Value) -> bool {
+        payload.get("isBlocking").and_then(Value::as_bool) == Some(false)
+            || payload
+                .get("arguments")
+                .and_then(Value::as_str)
+                .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                .and_then(|arguments| arguments.get("isBlocking").and_then(Value::as_bool))
+                == Some(false)
     }
 }
 
 #[derive(Debug, Default)]
 struct ClaudeCodeState {
     last_completed_turn_id: Option<String>,
+    last_input_request_key: Option<String>,
 }
 
 impl ClaudeCodeState {
-    fn process_line(&mut self, line: &str) -> bool {
+    fn process_line(&mut self, line: &str) -> Option<NotificationEvent> {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
-            return false;
+            return None;
         };
-        if value.get("type").and_then(Value::as_str) != Some("assistant")
-            || value
-                .pointer("/message/stop_reason")
-                .and_then(Value::as_str)
-                != Some("end_turn")
-        {
-            return false;
+        if value.get("type").and_then(Value::as_str) != Some("assistant") {
+            return None;
         }
         let turn_id = value.get("uuid").and_then(Value::as_str).map(str::to_owned);
+
+        let question = value
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("type").and_then(Value::as_str) == Some("tool_use")
+                        && item.get("name").and_then(Value::as_str) == Some("AskUserQuestion")
+                })
+            });
+        if let Some(question) = question {
+            let key = question
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| turn_id.clone())
+                .unwrap_or_else(|| line.to_owned());
+            if self.last_input_request_key.as_ref() == Some(&key) {
+                return None;
+            }
+            self.last_input_request_key = Some(key);
+            return Some(NotificationEvent::Notification);
+        }
+
+        if value
+            .pointer("/message/stop_reason")
+            .and_then(Value::as_str)
+            != Some("end_turn")
+        {
+            return None;
+        }
         if turn_id
             .as_ref()
             .is_some_and(|id| self.last_completed_turn_id.as_ref() == Some(id))
         {
-            return false;
+            return None;
         }
         self.last_completed_turn_id = turn_id;
-        true
+        Some(NotificationEvent::Stop)
     }
 }
 
@@ -404,12 +511,10 @@ struct OpenCodeState {
 }
 
 impl OpenCodeState {
-    fn process_line(&mut self, line: &str) -> bool {
+    fn process_line(&mut self, line: &str) -> Option<NotificationEvent> {
         let message = read_field(line, "message");
         if message.as_deref() == Some("created") {
-            let Some(session_id) = read_field(line, "id") else {
-                return false;
-            };
+            let session_id = read_field(line, "id")?;
             let parent_id = read_field(line, "parentID");
             if parent_id
                 .as_deref()
@@ -420,12 +525,14 @@ impl OpenCodeState {
                 self.ignored_sessions.remove(&session_id);
                 self.ignored_order.retain(|id| id != &session_id);
             }
-            return false;
+            return None;
         }
         if message.as_deref() != Some("exiting loop") {
-            return false;
+            return None;
         }
-        read_field(line, "session.id").is_some_and(|id| !self.ignored_sessions.contains(&id))
+        read_field(line, "session.id")
+            .is_some_and(|id| !self.ignored_sessions.contains(&id))
+            .then_some(NotificationEvent::Stop)
     }
 
     fn ignore_session(&mut self, session_id: String) {
@@ -448,8 +555,8 @@ impl OpenCodeState {
 struct HermesState {}
 
 impl HermesState {
-    fn process_line(&mut self, _line: &str) -> bool {
-        false
+    fn process_line(&mut self, _line: &str) -> Option<NotificationEvent> {
+        None
     }
 }
 
@@ -530,7 +637,7 @@ fn is_hermes_stop(finish_reason: &str, tool_calls: &str, content: &str) -> bool 
 pub struct LogMonitor {
     source: MonitorSource,
     tracked: HashMap<PathBuf, TrackedFile>,
-    dispatcher: CompletionDispatcher,
+    dispatcher: EventDispatcher,
     hermes: HashMap<PathBuf, HermesTracker>,
 }
 
@@ -538,15 +645,12 @@ impl LogMonitor {
     pub fn new(
         source: MonitorSource,
         completion_delay: Duration,
-        on_complete: CompletionHandler,
+        handler: NotificationHandler,
     ) -> Self {
-        Self::with_dispatcher(
-            source,
-            CompletionDispatcher::new(completion_delay, on_complete),
-        )
+        Self::with_dispatcher(source, EventDispatcher::new(completion_delay, handler))
     }
 
-    fn with_dispatcher(source: MonitorSource, dispatcher: CompletionDispatcher) -> Self {
+    fn with_dispatcher(source: MonitorSource, dispatcher: EventDispatcher) -> Self {
         let mut hermes = HashMap::new();
         if let MonitorSource::Hermes { db_paths } = &source {
             for p in db_paths {
@@ -611,13 +715,21 @@ impl LogMonitor {
         let mut completed = false;
         for line in lines {
             let line = String::from_utf8_lossy(&line);
-            if line.trim().is_empty() || !entry.parser.process_line(&line) || !notify {
+            if line.trim().is_empty() {
                 continue;
             }
-            completed = true;
+            let event = entry.parser.process_line(&line);
+            if !notify {
+                continue;
+            }
+            match event {
+                Some(NotificationEvent::Stop) => completed = true,
+                Some(event @ NotificationEvent::Notification) => self.dispatcher.dispatch(event),
+                None => {}
+            }
         }
         if completed {
-            self.dispatcher.notify();
+            self.dispatcher.dispatch(NotificationEvent::Stop);
         }
         if entry.offset >= metadata.len() {
             entry.lifecycle = FileLifecycle::Live;
@@ -627,6 +739,7 @@ impl LogMonitor {
     fn poll_hermes(&mut self) {
         let paths: Vec<PathBuf> = self.hermes.keys().cloned().collect();
         let mut completed = false;
+        let mut input_required = false;
         for db_path in paths {
             let tracker = self.hermes.get_mut(&db_path).expect("tracker exists");
             if fs::metadata(&db_path).is_err() {
@@ -677,22 +790,25 @@ impl LogMonitor {
                 if role != "assistant" {
                     continue;
                 }
-                if is_hermes_clarify(&tool_calls)
-                    || is_hermes_stop(&finish_reason, &tool_calls, &content)
-                {
+                if is_hermes_clarify(&tool_calls) {
+                    input_required = true;
+                } else if is_hermes_stop(&finish_reason, &tool_calls, &content) {
                     completed = true;
                 }
             }
             tracker.last_seen_id = Some(max_id);
         }
         if completed {
-            self.dispatcher.notify();
+            self.dispatcher.dispatch(NotificationEvent::Stop);
+        }
+        if input_required {
+            self.dispatcher.dispatch(NotificationEvent::Notification);
         }
     }
 }
 
-pub fn start_default_monitors(on_complete: CompletionHandler) {
-    let dispatcher = CompletionDispatcher::new(DEFAULT_COMPLETION_DELAY, on_complete);
+pub fn start_default_monitors(handler: NotificationHandler) {
+    let dispatcher = EventDispatcher::new(DEFAULT_COMPLETION_DELAY, handler);
     for source in [
         MonitorSource::codex_default(),
         MonitorSource::claude_code_default(),
@@ -715,6 +831,7 @@ mod tests {
     use super::*;
     use std::fs::{OpenOptions, create_dir_all, remove_dir_all, rename, write};
     use std::io::Write;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
@@ -750,13 +867,38 @@ mod tests {
             .unwrap();
     }
 
-    fn counter() -> (Arc<AtomicUsize>, CompletionHandler) {
+    fn counter() -> (Arc<AtomicUsize>, NotificationHandler) {
         let count = Arc::new(AtomicUsize::new(0));
         let target = Arc::clone(&count);
-        let handler = Arc::new(move || {
+        let handler = Arc::new(move |_| {
             target.fetch_add(1, Ordering::SeqCst);
         });
         (count, handler)
+    }
+
+    fn event_log() -> (Arc<Mutex<Vec<NotificationEvent>>>, NotificationHandler) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let target = Arc::clone(&events);
+        let handler = Arc::new(move |event| {
+            target.lock().unwrap().push(event);
+        });
+        (events, handler)
+    }
+
+    fn event_counter() -> (Arc<AtomicUsize>, Arc<AtomicUsize>, NotificationHandler) {
+        let completions = Arc::new(AtomicUsize::new(0));
+        let input_requests = Arc::new(AtomicUsize::new(0));
+        let completion_target = Arc::clone(&completions);
+        let input_target = Arc::clone(&input_requests);
+        let handler = Arc::new(move |event| match event {
+            NotificationEvent::Stop => {
+                completion_target.fetch_add(1, Ordering::SeqCst);
+            }
+            NotificationEvent::Notification => {
+                input_target.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (completions, input_requests, handler)
     }
 
     fn wait_for(count: &AtomicUsize, expected: usize) {
@@ -796,50 +938,183 @@ mod tests {
     }
 
     #[test]
+    fn input_requests_are_dispatched_without_completion_delay() {
+        let root = TempDir::new("codex-input");
+        let dir = root.0.join("2026/04/24");
+        create_dir_all(&dir).unwrap();
+        let file = dir.join("rollout-session.jsonl");
+        write(&file, "").unwrap();
+        let (events, handler) = event_log();
+        let mut monitor = LogMonitor::new(
+            MonitorSource::Codex {
+                sessions_dir: root.0.clone(),
+            },
+            Duration::from_secs(60),
+            handler,
+        );
+        let now = UNIX_EPOCH + Duration::from_secs(1_777_075_200);
+
+        monitor.poll(now);
+        let request = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"request_user_input\",\"call_id\":\"one\",\"arguments\":\"{\\\"questions\\\":[]}\"}}\n";
+        append(&file, request);
+        monitor.poll(now);
+        append(&file, request);
+        monitor.poll(now);
+
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[NotificationEvent::Notification]
+        );
+    }
+
+    #[test]
     fn codex_deduplicates_and_ignores_internal_sessions() {
         let mut state = CodexState::default();
-        assert!(!state.process_line("not-json"));
-        assert!(!state.process_line("{\"type\":\"turn_context\",\"payload\":{\"model\":\"codex-auto-review\",\"turn_id\":\"review\"}}"));
-        assert!(!state.process_line("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"review\"}}"));
-        assert!(state.process_line(
+        assert_eq!(state.process_line("not-json"), None);
+        assert_eq!(state.process_line("{\"type\":\"turn_context\",\"payload\":{\"model\":\"codex-auto-review\",\"turn_id\":\"review\"}}"), None);
+        assert_eq!(state.process_line("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"review\"}}"), None);
+        assert_eq!(
+            state.process_line(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"one\"}}"
+            ),
+            Some(NotificationEvent::Stop)
+        );
+        assert_eq!(state.process_line(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"one\"}}"
-        ));
-        assert!(!state.process_line(
-            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"one\"}}"
-        ));
+        ), None);
 
         let mut guardian = CodexState::default();
-        assert!(!guardian.process_line("{\"type\":\"session_meta\",\"payload\":{\"source\":{\"subagent\":{\"other\":\"guardian\"}}}}"));
-        assert!(!guardian.process_line(
+        assert_eq!(guardian.process_line("{\"type\":\"session_meta\",\"payload\":{\"source\":{\"subagent\":{\"other\":\"guardian\"}}}}"), None);
+        assert_eq!(guardian.process_line(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"one\"}}"
-        ));
+        ), None);
+    }
+
+    #[test]
+    fn codex_notifies_each_user_input_request_once() {
+        let mut state = CodexState::default();
+        for (index, event_type) in [
+            "exec_approval_request",
+            "request_permissions",
+            "request_user_input",
+            "elicitation_request",
+            "apply_patch_approval_request",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let event = format!(
+                "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"{event_type}\",\"call_id\":\"call-{index}\"}}}}"
+            );
+            assert_eq!(
+                state.process_line(&event),
+                Some(NotificationEvent::Notification)
+            );
+            assert_eq!(state.process_line(&event), None);
+        }
+
+        let function_call = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"request_user_input\",\"call_id\":\"function-call\",\"arguments\":\"{\\\"questions\\\":[]}\"}}";
+        assert_eq!(
+            state.process_line(function_call),
+            Some(NotificationEvent::Notification)
+        );
+        assert_eq!(state.process_line(function_call), None);
+        assert_eq!(
+            state.process_line("{\"type\":\"event_msg\",\"payload\":{\"type\":\"request_user_input\",\"call_id\":\"non-blocking\",\"isBlocking\":false}}"),
+            None
+        );
+        assert_eq!(
+            state.process_line("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"request_user_input\",\"call_id\":\"non-blocking-function-call\",\"arguments\":\"{\\\"questions\\\":[],\\\"isBlocking\\\":false}\"}}"),
+            None
+        );
+        assert_eq!(
+            state.process_line(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"elicitation_request\",\"id\":42}}"
+            ),
+            Some(NotificationEvent::Notification)
+        );
+        assert_eq!(
+            state.process_line(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"elicitation_request\",\"id\":42}}"
+            ),
+            None
+        );
+        assert_eq!(
+            state.process_line("{\"type\":\"event_msg\",\"payload\":{\"type\":\"exec_approval_request\",\"call_id\":\"shared\",\"approval_id\":\"first\"}}"),
+            Some(NotificationEvent::Notification)
+        );
+        assert_eq!(
+            state.process_line("{\"type\":\"event_msg\",\"payload\":{\"type\":\"exec_approval_request\",\"call_id\":\"shared\",\"approval_id\":\"second\"}}"),
+            Some(NotificationEvent::Notification)
+        );
     }
 
     #[test]
     fn missing_event_ids_do_not_suppress_completions() {
         let mut codex = CodexState::default();
         let codex_event = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}";
-        assert!(codex.process_line(codex_event));
-        assert!(codex.process_line(codex_event));
+        assert_eq!(
+            codex.process_line(codex_event),
+            Some(NotificationEvent::Stop)
+        );
+        assert_eq!(
+            codex.process_line(codex_event),
+            Some(NotificationEvent::Stop)
+        );
 
         let mut claude = ClaudeCodeState::default();
         let claude_event = "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}";
-        assert!(claude.process_line(claude_event));
-        assert!(claude.process_line(claude_event));
+        assert_eq!(
+            claude.process_line(claude_event),
+            Some(NotificationEvent::Stop)
+        );
+        assert_eq!(
+            claude.process_line(claude_event),
+            Some(NotificationEvent::Stop)
+        );
     }
 
     #[test]
     fn claude_notifies_end_turn_once() {
         let mut state = ClaudeCodeState::default();
-        assert!(!state.process_line(
+        assert_eq!(state.process_line(
             "{\"type\":\"assistant\",\"uuid\":\"one\",\"message\":{\"stop_reason\":\"tool_use\"}}"
-        ));
-        assert!(state.process_line(
+        ), None);
+        assert_eq!(state.process_line(
             "{\"type\":\"assistant\",\"uuid\":\"one\",\"message\":{\"stop_reason\":\"end_turn\"}}"
-        ));
-        assert!(!state.process_line(
+        ), Some(NotificationEvent::Stop));
+        assert_eq!(state.process_line(
             "{\"type\":\"assistant\",\"uuid\":\"one\",\"message\":{\"stop_reason\":\"end_turn\"}}"
-        ));
+        ), None);
+    }
+
+    #[test]
+    fn claude_notifies_each_ask_user_question_once() {
+        let mut state = ClaudeCodeState::default();
+        let question = "{\"type\":\"assistant\",\"uuid\":\"question-one\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\"}]}}";
+        assert_eq!(
+            state.process_line(question),
+            Some(NotificationEvent::Notification)
+        );
+        assert_eq!(state.process_line(question), None);
+        assert_eq!(
+            state.process_line("{\"type\":\"assistant\",\"uuid\":\"bash\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\"}]}}"),
+            None
+        );
+
+        let question_without_message_id = "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tool-one\",\"name\":\"AskUserQuestion\"}]}}";
+        assert_eq!(
+            state.process_line(question_without_message_id),
+            Some(NotificationEvent::Notification)
+        );
+        assert_eq!(state.process_line(question_without_message_id), None);
+
+        let question_without_ids = "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\"}]}}";
+        assert_eq!(
+            state.process_line(question_without_ids),
+            Some(NotificationEvent::Notification)
+        );
+        assert_eq!(state.process_line(question_without_ids), None);
     }
 
     #[test]
@@ -860,9 +1135,18 @@ mod tests {
     #[test]
     fn opencode_tracks_parent_sessions_and_quoted_fields() {
         let mut state = OpenCodeState::default();
-        assert!(!state.process_line("id=child parentID=parent message=created"));
-        assert!(!state.process_line("session.id=child message=\"exiting loop\""));
-        assert!(state.process_line("session.id=root message=\"exiting loop\""));
+        assert_eq!(
+            state.process_line("id=child parentID=parent message=created"),
+            None
+        );
+        assert_eq!(
+            state.process_line("session.id=child message=\"exiting loop\""),
+            None
+        );
+        assert_eq!(
+            state.process_line("session.id=root message=\"exiting loop\""),
+            Some(NotificationEvent::Stop)
+        );
         assert_eq!(
             read_field("message=\"hello \\\"zunda\\\"\"", "message").as_deref(),
             Some("hello \"zunda\"")
@@ -877,8 +1161,9 @@ mod tests {
     fn opencode_bounds_ignored_session_state() {
         let mut state = OpenCodeState::default();
         for index in 0..=MAX_IGNORED_SESSIONS {
-            assert!(
-                !state.process_line(&format!("id=child-{index} parentID=parent message=created"))
+            assert_eq!(
+                state.process_line(&format!("id=child-{index} parentID=parent message=created")),
+                None
             );
         }
         assert_eq!(state.ignored_sessions.len(), MAX_IGNORED_SESSIONS);
@@ -1137,7 +1422,7 @@ mod tests {
             rusqlite::params!["s1", "assistant", "old", "", "stop", 1.0],
         ).unwrap();
         drop(conn);
-        let (count, handler) = counter();
+        let (completions, input_requests, handler) = event_counter();
         let mut monitor = LogMonitor::new(
             MonitorSource::Hermes {
                 db_paths: vec![db_path.clone()],
@@ -1147,7 +1432,8 @@ mod tests {
         );
         // first poll primes — no notification for history
         monitor.poll(SystemTime::now());
-        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(completions.load(Ordering::SeqCst), 0);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 0);
         // append a new stop row
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
@@ -1156,7 +1442,8 @@ mod tests {
         ).unwrap();
         drop(conn);
         monitor.poll(SystemTime::now());
-        wait_for(&count, 1);
+        wait_for(&completions, 1);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 0);
         // append a clarify row -> also notifies (coalesced)
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
@@ -1165,7 +1452,8 @@ mod tests {
         ).unwrap();
         drop(conn);
         monitor.poll(SystemTime::now());
-        wait_for(&count, 2);
+        assert_eq!(completions.load(Ordering::SeqCst), 1);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

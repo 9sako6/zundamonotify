@@ -1,11 +1,11 @@
 # zundamonotify
 
-Codex、Claude Code、opencode、Hermes の完了を、ずんだもんの音声で知らせる Mac 用ツールなのだ。
+Codex、Claude Code、opencode、Hermes の完了や入力待ちを、ずんだもんの音声で知らせる Mac 用ツールなのだ。
 
 ## できることなのだ
 
-- Codex、Claude Code、opencode、Hermes のローカルログをポーリングするのだ
-- 作業完了を検知したら、ずんだもんの音声で知らせるのだ
+- Codex、Claude Code、opencode、Hermes の作業完了を、ずんだもんの音声で知らせるのだ
+- 対応しているユーザーの入力待ちを、別の音声で知らせるのだ
 - ログイン時に自動起動できるのだ
 
 ## 音声を試すのだ
