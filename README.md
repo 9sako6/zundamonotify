@@ -63,14 +63,6 @@ module がコマンドのインストールと自動起動をまとめて管理�
 zundamonotify status
 ```
 
-入力待ちの通知対象は次のとおりなのだ。
-
-- Codex: 許可、選択、確認
-- Hermes: 選択式質問
-- Claude Code: 選択式質問
-
-Claude Code の許可と MCP の入力待ちは、今は通知しないのだ。
-
 一度だけ実行する場合は `nix run` を使えるのだ。
 
 ```bash
