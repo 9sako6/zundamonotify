@@ -1,10 +1,11 @@
 use std::env;
 use std::process::ExitCode;
 use std::sync::Arc;
+use zundamonotify::NotificationHandler;
 use zundamonotify::launchd::inspect_launch_agent;
 use zundamonotify::monitor::start_default_monitors;
 use zundamonotify::notifier::{AssetFiles, Notifier};
-use zundamonotify::server::{NotificationHandler, Server};
+use zundamonotify::server::Server;
 
 const HELP: &str =
     "zundamonotify - AIエージェントの作業完了や入力待ちを、ずんだもんの声で知らせるのだ

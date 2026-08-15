@@ -1,4 +1,5 @@
 use crate::NotificationEvent;
+pub use crate::NotificationHandler;
 use serde_json::Value;
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -24,8 +25,6 @@ const CONNECTION_WORKERS: usize = 4;
 const PENDING_CONNECTIONS: usize = 16;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
-
-pub type NotificationHandler = Arc<dyn Fn(NotificationEvent) + Send + Sync>;
 
 pub struct Server {
     listener: TcpListener,
