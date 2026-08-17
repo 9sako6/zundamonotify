@@ -19,6 +19,7 @@ const MAX_BYTES_PER_POLL: usize = 256 * 1024;
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const HERMES_MAX_ROWS_PER_POLL: usize = 400;
 const HERMES_SQLITE_BUSY_TIMEOUT_MS: i32 = 200;
+const CLAUDE_INPUT_WAIT_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct EventDispatcher {
@@ -73,10 +74,19 @@ impl EventDispatcher {
 
 #[derive(Clone, Debug)]
 pub enum MonitorSource {
-    Codex { sessions_dir: PathBuf },
-    ClaudeCode { projects_dir: PathBuf },
-    OpenCode { log_path: PathBuf },
-    Hermes { db_paths: Vec<PathBuf> },
+    Codex {
+        sessions_dir: PathBuf,
+    },
+    ClaudeCode {
+        projects_dir: PathBuf,
+        sessions_dir: PathBuf,
+    },
+    OpenCode {
+        log_path: PathBuf,
+    },
+    Hermes {
+        db_paths: Vec<PathBuf>,
+    },
 }
 
 impl MonitorSource {
@@ -89,6 +99,7 @@ impl MonitorSource {
     pub fn claude_code_default() -> Self {
         Self::ClaudeCode {
             projects_dir: home_dir().join(".claude/projects"),
+            sessions_dir: home_dir().join(".claude/sessions"),
         }
     }
 
@@ -110,7 +121,7 @@ impl MonitorSource {
     fn list_files(&self, now: SystemTime) -> Vec<PathBuf> {
         match self {
             Self::Codex { sessions_dir } => codex_session_files(sessions_dir, now),
-            Self::ClaudeCode { projects_dir } => claude_session_files(projects_dir),
+            Self::ClaudeCode { projects_dir, .. } => claude_session_files(projects_dir),
             Self::OpenCode { log_path } => vec![log_path.clone()],
             Self::Hermes { .. } => Vec::new(),
         }
@@ -571,6 +582,12 @@ impl HermesTracker {
     }
 }
 
+#[derive(Debug)]
+struct ClaudeSessionStatus {
+    status: String,
+    status_updated_at: i64,
+}
+
 fn read_field(line: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=");
     let mut search_from = 0;
@@ -639,6 +656,9 @@ pub struct LogMonitor {
     tracked: HashMap<PathBuf, TrackedFile>,
     dispatcher: EventDispatcher,
     hermes: HashMap<PathBuf, HermesTracker>,
+    claude_sessions: HashMap<PathBuf, ClaudeSessionStatus>,
+    claude_sessions_primed: bool,
+    claude_input_waits: HashMap<String, SystemTime>,
 }
 
 impl LogMonitor {
@@ -662,6 +682,9 @@ impl LogMonitor {
             tracked: HashMap::new(),
             dispatcher,
             hermes,
+            claude_sessions: HashMap::new(),
+            claude_sessions_primed: false,
+            claude_input_waits: HashMap::new(),
         }
     }
 
@@ -676,13 +699,14 @@ impl LogMonitor {
             let Ok(metadata) = fs::metadata(&path) else {
                 continue;
             };
-            self.poll_file(&path, &metadata);
+            self.poll_file(&path, &metadata, now);
         }
         self.tracked
             .retain(|path, _| active.contains(path) && path.exists());
+        self.poll_claude_sessions(now);
     }
 
-    fn poll_file(&mut self, path: &Path, metadata: &Metadata) {
+    fn poll_file(&mut self, path: &Path, metadata: &Metadata, now: SystemTime) {
         let identity = (metadata.dev(), metadata.ino());
         let replaced = self
             .tracked
@@ -713,6 +737,7 @@ impl LogMonitor {
         };
 
         let mut completed = false;
+        let mut input_waits = 0_usize;
         for line in lines {
             let line = String::from_utf8_lossy(&line);
             if line.trim().is_empty() {
@@ -724,15 +749,114 @@ impl LogMonitor {
             }
             match event {
                 Some(NotificationEvent::Stop) => completed = true,
-                Some(event @ NotificationEvent::Notification) => self.dispatcher.dispatch(event),
+                Some(NotificationEvent::Notification) => input_waits += 1,
                 None => {}
+            }
+        }
+        if entry.offset >= metadata.len() {
+            entry.lifecycle = FileLifecycle::Live;
+        }
+        for _ in 0..input_waits {
+            if self.allow_input_wait_for_file(path, now) {
+                self.dispatcher.dispatch(NotificationEvent::Notification);
             }
         }
         if completed {
             self.dispatcher.dispatch(NotificationEvent::Stop);
         }
-        if entry.offset >= metadata.len() {
-            entry.lifecycle = FileLifecycle::Live;
+    }
+
+    fn allow_input_wait_for_file(&mut self, path: &Path, now: SystemTime) -> bool {
+        if !matches!(self.source, MonitorSource::ClaudeCode { .. }) {
+            return true;
+        }
+        let session_id = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.allow_claude_input_wait(&session_id, now)
+    }
+
+    fn allow_claude_input_wait(&mut self, session_id: &str, now: SystemTime) -> bool {
+        self.claude_input_waits.retain(|_, at| {
+            now.duration_since(*at)
+                .is_ok_and(|elapsed| elapsed < CLAUDE_INPUT_WAIT_DEDUP_WINDOW)
+        });
+        if self.claude_input_waits.contains_key(session_id) {
+            return false;
+        }
+        self.claude_input_waits.insert(session_id.to_owned(), now);
+        true
+    }
+
+    fn poll_claude_sessions(&mut self, now: SystemTime) {
+        let MonitorSource::ClaudeCode { sessions_dir, .. } = &self.source else {
+            return;
+        };
+        let sessions_dir = sessions_dir.clone();
+        let primed = std::mem::replace(&mut self.claude_sessions_primed, true);
+        let Ok(entries) = fs::read_dir(&sessions_dir) else {
+            self.claude_sessions.clear();
+            return;
+        };
+        let mut seen = HashSet::new();
+        let mut new_waits = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if value.get("kind").and_then(Value::as_str) != Some("interactive") {
+                continue;
+            }
+            let Some(status) = value.get("status").and_then(Value::as_str) else {
+                continue;
+            };
+            let status_updated_at = value
+                .get("statusUpdatedAt")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let session_id = value
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
+            seen.insert(path.clone());
+            let previous = self.claude_sessions.insert(
+                path,
+                ClaudeSessionStatus {
+                    status: status.to_owned(),
+                    status_updated_at,
+                },
+            );
+            if status != "waiting" {
+                continue;
+            }
+            let entered_wait = match previous {
+                Some(previous) => {
+                    previous.status != "waiting" || previous.status_updated_at != status_updated_at
+                }
+                None => primed,
+            };
+            if entered_wait {
+                new_waits.push(session_id);
+            }
+        }
+        self.claude_sessions.retain(|path, _| seen.contains(path));
+        for session_id in new_waits {
+            if self.allow_claude_input_wait(&session_id, now) {
+                self.dispatcher.dispatch(NotificationEvent::Notification);
+            }
         }
     }
 
@@ -1365,6 +1489,7 @@ mod tests {
         let mut monitor = LogMonitor::new(
             MonitorSource::ClaudeCode {
                 projects_dir: root.0.clone(),
+                sessions_dir: root.0.join("sessions"),
             },
             Duration::from_millis(20),
             handler,
@@ -1377,6 +1502,180 @@ mod tests {
         wait_for(&count, 1);
         thread::sleep(Duration::from_millis(30));
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    fn claude_session_json(session_id: &str, kind: &str, status: &str, updated_at: i64) -> String {
+        format!(
+            "{{\"pid\":100,\"sessionId\":\"{session_id}\",\"kind\":\"{kind}\",\"status\":\"{status}\",\"statusUpdatedAt\":{updated_at}}}"
+        )
+    }
+
+    fn claude_monitor_with_sessions(
+        name: &str,
+    ) -> (
+        TempDir,
+        PathBuf,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        LogMonitor,
+    ) {
+        let root = TempDir::new(name);
+        let sessions_dir = root.0.join("sessions");
+        let projects_dir = root.0.join("projects");
+        create_dir_all(&sessions_dir).unwrap();
+        create_dir_all(&projects_dir).unwrap();
+        let (completions, input_requests, handler) = event_counter();
+        let monitor = LogMonitor::new(
+            MonitorSource::ClaudeCode {
+                projects_dir,
+                sessions_dir: sessions_dir.clone(),
+            },
+            Duration::ZERO,
+            handler,
+        );
+        (root, sessions_dir, completions, input_requests, monitor)
+    }
+
+    #[test]
+    fn claude_sessions_notify_when_status_enters_waiting() {
+        let (_root, sessions_dir, completions, input_requests, mut monitor) =
+            claude_monitor_with_sessions("claude-sessions");
+        let file = sessions_dir.join("100.json");
+        write(
+            &file,
+            claude_session_json("session-a", "interactive", "busy", 1),
+        )
+        .unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_777_075_200);
+
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 0);
+
+        write(
+            &file,
+            claude_session_json("session-a", "interactive", "waiting", 2),
+        )
+        .unwrap();
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 1);
+
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 1);
+
+        write(
+            &file,
+            claude_session_json("session-a", "interactive", "shell", 3),
+        )
+        .unwrap();
+        monitor.poll(now + Duration::from_secs(6));
+        write(
+            &file,
+            claude_session_json("session-a", "interactive", "waiting", 4),
+        )
+        .unwrap();
+        monitor.poll(now + Duration::from_secs(12));
+        assert_eq!(input_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(completions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn claude_sessions_prime_existing_waits_without_notification() {
+        let (_root, sessions_dir, _completions, input_requests, mut monitor) =
+            claude_monitor_with_sessions("claude-sessions-prime");
+        let file = sessions_dir.join("100.json");
+        write(
+            &file,
+            claude_session_json("session-a", "interactive", "waiting", 1),
+        )
+        .unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_777_075_200);
+
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 0);
+
+        write(
+            &file,
+            claude_session_json("session-a", "interactive", "waiting", 2),
+        )
+        .unwrap();
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn claude_sessions_notify_new_sessions_already_waiting() {
+        let (_root, sessions_dir, _completions, input_requests, mut monitor) =
+            claude_monitor_with_sessions("claude-sessions-new");
+        let now = UNIX_EPOCH + Duration::from_secs(1_777_075_200);
+
+        monitor.poll(now);
+        write(
+            sessions_dir.join("100.json"),
+            claude_session_json("session-a", "interactive", "waiting", 1),
+        )
+        .unwrap();
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn claude_sessions_ignore_non_interactive_kinds() {
+        let (_root, sessions_dir, _completions, input_requests, mut monitor) =
+            claude_monitor_with_sessions("claude-sessions-kind");
+        let file = sessions_dir.join("100.json");
+        write(
+            &file,
+            claude_session_json("session-a", "background", "busy", 1),
+        )
+        .unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_777_075_200);
+
+        monitor.poll(now);
+        write(
+            &file,
+            claude_session_json("session-a", "background", "waiting", 2),
+        )
+        .unwrap();
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn claude_transcript_and_session_waits_are_deduped_per_session() {
+        let (root, sessions_dir, _completions, input_requests, mut monitor) =
+            claude_monitor_with_sessions("claude-sessions-dedup");
+        let project = root.0.join("projects/project");
+        create_dir_all(&project).unwrap();
+        let transcript = project.join("session-a.jsonl");
+        write(&transcript, "").unwrap();
+        let session_file = sessions_dir.join("100.json");
+        write(
+            &session_file,
+            claude_session_json("session-a", "interactive", "busy", 1),
+        )
+        .unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_777_075_200);
+
+        monitor.poll(now);
+        append(
+            &transcript,
+            "{\"type\":\"assistant\",\"uuid\":\"one\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tool-one\",\"name\":\"AskUserQuestion\"}]}}\n",
+        );
+        write(
+            &session_file,
+            claude_session_json("session-a", "interactive", "waiting", 2),
+        )
+        .unwrap();
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 1);
+
+        write(
+            sessions_dir.join("101.json"),
+            claude_session_json("session-b", "interactive", "waiting", 3),
+        )
+        .unwrap();
+        monitor.poll(now);
+        assert_eq!(input_requests.load(Ordering::SeqCst), 2);
     }
 
     #[test]
