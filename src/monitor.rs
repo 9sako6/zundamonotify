@@ -345,9 +345,8 @@ impl CodexState {
 
         if event_type == Some("session_meta") {
             if payload
-                .and_then(|p| p.pointer("/source/subagent/other"))
-                .and_then(Value::as_str)
-                == Some("guardian")
+                .and_then(|p| p.pointer("/source/subagent"))
+                .is_some()
             {
                 self.ignored = true;
             }
@@ -1112,6 +1111,105 @@ mod tests {
         assert_eq!(guardian.process_line(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"one\"}}"
         ), None);
+    }
+
+    #[test]
+    fn codex_ignores_subagent_notifications() {
+        for source in [
+            serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": "main", "depth": 1}}}),
+            serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": "child", "depth": 2}}}),
+            serde_json::json!({"subagent": "review"}),
+            serde_json::json!({"subagent": "compact"}),
+            serde_json::json!({"subagent": {"other": "guardian"}}),
+        ] {
+            let mut state = CodexState::default();
+            let metadata =
+                serde_json::json!({"type": "session_meta", "payload": {"source": source}});
+            assert_eq!(state.process_line(&metadata.to_string()), None);
+
+            for line in [
+                r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"request_user_input","call_id":"input"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"exec_approval_request","call_id":"approval"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"question"}}"#,
+            ] {
+                assert_eq!(state.process_line(line), None, "source: {source}");
+            }
+        }
+    }
+
+    #[test]
+    fn codex_preserves_main_agent_notifications() {
+        for payload in [
+            serde_json::json!({"source": "cli"}),
+            serde_json::json!({"source": "vscode"}),
+            serde_json::json!({"source": "exec"}),
+            serde_json::json!({}),
+        ] {
+            let mut state = CodexState::default();
+            let metadata = serde_json::json!({"type": "session_meta", "payload": payload});
+            assert_eq!(state.process_line(&metadata.to_string()), None);
+            assert_eq!(
+                state.process_line(r#"{"type":"event_msg","payload":{"type":"request_user_input","call_id":"input"}}"#),
+                Some(NotificationEvent::Notification),
+                "payload: {payload}"
+            );
+            assert_eq!(
+                state.process_line(
+                    r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#
+                ),
+                Some(NotificationEvent::Stop),
+                "payload: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_filters_subagents_when_primed_or_discovered_live() {
+        let root = TempDir::new("codex-subagents");
+        let dir = root.0.join("2026/04/24");
+        create_dir_all(&dir).unwrap();
+        let main = dir.join("rollout-main.jsonl");
+        let child = dir.join("rollout-child.jsonl");
+        let nested = dir.join("rollout-nested.jsonl");
+        write(
+            &main,
+            "{\"type\":\"session_meta\",\"payload\":{\"source\":\"vscode\"}}\n",
+        )
+        .unwrap();
+        let child_metadata = "{\"type\":\"session_meta\",\"payload\":{\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"main\",\"depth\":1}}}}}\n";
+        write(&child, child_metadata).unwrap();
+        let (events, handler) = event_log();
+        let mut monitor = LogMonitor::with_dispatcher(
+            MonitorSource::Codex {
+                sessions_dir: root.0.clone(),
+            },
+            EventDispatcher {
+                completion: CompletionDispatch::Inline,
+                handler,
+            },
+        );
+        let now = UNIX_EPOCH + Duration::from_secs(1_777_075_200);
+        monitor.poll(now);
+        write(&nested, "").unwrap();
+        monitor.poll(now);
+        append(
+            &nested,
+            "{\"type\":\"session_meta\",\"payload\":{\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"child\",\"depth\":2}}}}}\n",
+        );
+
+        let notifications = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"request_user_input\",\"call_id\":\"input\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"one\"}}\n";
+        append(&child, notifications);
+        append(&nested, notifications);
+        monitor.poll(now);
+        assert!(events.lock().unwrap().is_empty());
+
+        append(&main, notifications);
+        monitor.poll(now);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[NotificationEvent::Notification, NotificationEvent::Stop]
+        );
     }
 
     #[test]
